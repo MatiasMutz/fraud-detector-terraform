@@ -1,6 +1,8 @@
+data "aws_region" "current" {}
+
 locals {
   module_tags = merge(var.tags, {
-    Component = "api"
+    Service = "api"
   })
 
   function_name  = format("%s-api", var.project)
@@ -21,6 +23,7 @@ locals {
     "OPTIONS /transactions/{id}",
     "OPTIONS /users",
     "OPTIONS /users/{id}",
+    "OPTIONS /users/{id}/behavior",
   ])
 }
 
@@ -31,7 +34,8 @@ resource "aws_cloudwatch_log_group" "api_lambda" {
   retention_in_days = var.log_retention_days
 
   tags = merge(local.module_tags, {
-    Name = local.log_group_name
+    Component = "cloudwatch-log-group"
+    Name      = local.log_group_name
   })
 }
 
@@ -41,7 +45,8 @@ resource "aws_security_group" "api_lambda" {
   vpc_id      = var.vpc_id
 
   tags = merge(local.module_tags, {
-    Name = format("%s-api-lambda-sg", var.project)
+    Component = "security-group"
+    Name      = format("%s-api-lambda-sg", var.project)
   })
 }
 
@@ -53,7 +58,26 @@ resource "aws_vpc_security_group_egress_rule" "api_to_endpoints" {
   from_port                    = 443
   to_port                      = 443
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "security-group-rule"
+  })
+}
+
+data "aws_prefix_list" "dynamodb" {
+  name = format("com.amazonaws.%s.dynamodb", data.aws_region.current.name)
+}
+
+resource "aws_vpc_security_group_egress_rule" "api_to_dynamodb" {
+  security_group_id = aws_security_group.api_lambda.id
+  description       = "HTTPS hacia DynamoDB via Gateway VPC Endpoint (user behavior profiles)"
+  prefix_list_id    = data.aws_prefix_list.dynamodb.id
+  ip_protocol       = "tcp"
+  from_port         = 443
+  to_port           = 443
+
+  tags = merge(local.module_tags, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_lambda_function" "api" {
@@ -80,20 +104,22 @@ resource "aws_lambda_function" "api" {
 
   environment {
     variables = {
-      DB_HOST               = var.db_host
-      DB_PORT               = tostring(var.db_port)
-      DB_NAME               = var.db_name
-      DB_USER               = var.db_username
-      DB_PASSWORD           = var.db_password
-      SUMMARY_SNS_TOPIC_ARN = var.sns_topic_arn
-      AUTH_LOCAL_BYPASS     = "false"
+      DB_HOST                  = var.db_host
+      DB_PORT                  = tostring(var.db_port)
+      DB_NAME                  = var.db_name
+      DB_USER                  = var.db_username
+      DB_PASSWORD              = var.db_password
+      SUMMARY_SNS_TOPIC_ARN    = var.sns_topic_arn
+      USER_BEHAVIOR_TABLE_NAME = var.user_behavior_table_name
+      AUTH_LOCAL_BYPASS        = "false"
     }
   }
 
   depends_on = [aws_cloudwatch_log_group.api_lambda]
 
   tags = merge(local.module_tags, {
-    Name = local.function_name
+    Component = "lambda"
+    Name      = local.function_name
   })
 }
 
@@ -111,7 +137,8 @@ resource "aws_apigatewayv2_api" "main" {
   }
 
   tags = merge(local.module_tags, {
-    Name = local.api_name
+    Component = "api-gateway"
+    Name      = local.api_name
   })
 }
 
@@ -134,7 +161,8 @@ resource "aws_cloudwatch_log_group" "api_gw" {
   retention_in_days = var.log_retention_days
 
   tags = merge(local.module_tags, {
-    Name = format("/aws/apigateway/%s-api", var.project)
+    Component = "cloudwatch-log-group"
+    Name      = format("/aws/apigateway/%s-api", var.project)
   })
 }
 
@@ -145,7 +173,8 @@ resource "aws_apigatewayv2_stage" "default" {
   auto_deploy = true
 
   tags = merge(local.module_tags, {
-    Name = format("%s-api-default-stage", var.project)
+    Component = "api-gateway-stage"
+    Name      = format("%s-api-default-stage", var.project)
   })
 }
 
@@ -215,6 +244,14 @@ resource "aws_apigatewayv2_route" "get_users" {
 resource "aws_apigatewayv2_route" "get_user_by_id" {
   api_id             = aws_apigatewayv2_api.main.id
   route_key          = "GET /users/{id}"
+  target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  authorizer_id      = aws_apigatewayv2_authorizer.jwt.id
+  authorization_type = "JWT"
+}
+
+resource "aws_apigatewayv2_route" "get_user_behavior" {
+  api_id             = aws_apigatewayv2_api.main.id
+  route_key          = "GET /users/{id}/behavior"
   target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
   authorizer_id      = aws_apigatewayv2_authorizer.jwt.id
   authorization_type = "JWT"

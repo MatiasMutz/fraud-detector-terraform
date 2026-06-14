@@ -2,7 +2,7 @@ data "aws_region" "current" {}
 
 locals {
   module_tags = merge(var.tags, {
-    Component = "compute"
+    Service = "fraud-engine"
   })
 
   cluster_name        = format("%s-cluster", var.project)
@@ -63,7 +63,8 @@ resource "aws_ecr_repository" "app" {
   }
 
   tags = merge(local.module_tags, {
-    Name = local.ecr_repository_name
+    Component = "ecr-repository"
+    Name      = local.ecr_repository_name
   })
 }
 
@@ -74,7 +75,8 @@ resource "aws_cloudwatch_log_group" "app" {
   retention_in_days = var.log_retention_days
 
   tags = merge(local.module_tags, {
-    Name = local.log_group_name
+    Component = "cloudwatch-log-group"
+    Name      = local.log_group_name
   })
 }
 
@@ -87,7 +89,8 @@ resource "aws_ecs_cluster" "main" {
   }
 
   tags = merge(local.module_tags, {
-    Name = local.cluster_name
+    Component = "ecs-cluster"
+    Name      = local.cluster_name
   })
 }
 
@@ -97,7 +100,8 @@ resource "aws_security_group" "task" {
   vpc_id      = var.vpc_id
 
   tags = merge(local.module_tags, {
-    Name = format("%s-task-sg", var.project)
+    Component = "security-group"
+    Name      = format("%s-task-sg", var.project)
   })
 }
 
@@ -109,7 +113,9 @@ resource "aws_vpc_security_group_egress_rule" "task_to_endpoints" {
   from_port                    = 443
   to_port                      = 443
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "security-group-rule"
+  })
 }
 
 data "aws_prefix_list" "s3" {
@@ -128,7 +134,9 @@ resource "aws_vpc_security_group_egress_rule" "task_to_s3" {
   from_port         = 443
   to_port           = 443
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_vpc_security_group_egress_rule" "task_to_dynamodb" {
@@ -139,7 +147,9 @@ resource "aws_vpc_security_group_egress_rule" "task_to_dynamodb" {
   from_port         = 443
   to_port           = 443
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_ecs_task_definition" "app" {
@@ -161,7 +171,8 @@ resource "aws_ecs_task_definition" "app" {
   }
 
   tags = merge(local.module_tags, {
-    Name = local.task_family
+    Component = "ecs-task-definition"
+    Name      = local.task_family
   })
 }
 
@@ -190,7 +201,8 @@ resource "aws_ecs_service" "app" {
   ]
 
   tags = merge(local.module_tags, {
-    Name = local.service_name
+    Component = "ecs-service"
+    Name      = local.service_name
   })
 }
 
@@ -201,7 +213,9 @@ resource "aws_appautoscaling_target" "ecs" {
   scalable_dimension = "ecs:service:DesiredCount"
   service_namespace  = "ecs"
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "autoscaling-target"
+  })
 }
 
 resource "aws_appautoscaling_policy" "queue_depth_target" {

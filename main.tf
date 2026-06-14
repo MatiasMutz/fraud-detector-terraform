@@ -122,6 +122,7 @@ module "api" {
   db_username                = module.data_store.db_username
   db_password                = random_password.db.result
   sns_topic_arn              = module.notification.topic_arn
+  user_behavior_table_name   = module.data_store.table_name
   jwt_issuer                 = module.auth.issuer
   jwt_audience               = module.auth.client_id
   package_file               = data.archive_file.api_lambda.output_path

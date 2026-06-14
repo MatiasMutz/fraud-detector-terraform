@@ -2,7 +2,7 @@ data "aws_region" "current" {}
 
 locals {
   module_tags = merge(var.tags, {
-    Component = "network"
+    Service = "network"
   })
 
   interface_endpoint_services = {
@@ -56,16 +56,43 @@ module "vpc" {
 
   tags = local.module_tags
 
+  vpc_tags = {
+    Component = "vpc"
+  }
+
   private_subnet_tags = {
-    Tier = "app"
+    Component = "subnet"
+    Tier      = "app"
   }
 
   database_subnet_tags = {
-    Tier = "data"
+    Component = "subnet"
+    Tier      = "data"
   }
 
   intra_subnet_tags = {
-    Tier = "endpoints"
+    Component = "subnet"
+    Tier      = "endpoints"
+  }
+
+  private_route_table_tags = {
+    Component = "route-table"
+  }
+
+  database_route_table_tags = {
+    Component = "route-table"
+  }
+
+  intra_route_table_tags = {
+    Component = "route-table"
+  }
+
+  vpn_gateway_tags = {
+    Component = "vpn-gateway"
+  }
+
+  default_security_group_tags = {
+    Component = "security-group"
   }
 }
 
@@ -101,7 +128,8 @@ resource "aws_security_group" "endpoints" {
   vpc_id      = module.vpc.vpc_id
 
   tags = merge(local.module_tags, {
-    Name = format("%s-endpoints-sg", var.project)
+    Component = "security-group"
+    Name      = format("%s-endpoints-sg", var.project)
   })
 }
 
@@ -115,7 +143,9 @@ resource "aws_vpc_security_group_ingress_rule" "endpoints_https_from_app_subnet"
   from_port         = 443
   to_port           = 443
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_vpc_security_group_ingress_rule" "endpoints_https_from_additional_cidr" {
@@ -128,7 +158,9 @@ resource "aws_vpc_security_group_ingress_rule" "endpoints_https_from_additional_
   from_port         = 443
   to_port           = 443
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_vpc_security_group_egress_rule" "endpoints_to_app_subnet" {
@@ -139,7 +171,9 @@ resource "aws_vpc_security_group_egress_rule" "endpoints_to_app_subnet" {
   cidr_ipv4         = each.value
   ip_protocol       = "-1"
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_vpc_security_group_egress_rule" "endpoints_to_additional_cidr" {
@@ -150,7 +184,9 @@ resource "aws_vpc_security_group_egress_rule" "endpoints_to_additional_cidr" {
   cidr_ipv4         = each.value
   ip_protocol       = "-1"
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_vpc_endpoint" "gateway" {
@@ -162,7 +198,8 @@ resource "aws_vpc_endpoint" "gateway" {
   route_table_ids   = module.vpc.private_route_table_ids
 
   tags = merge(local.module_tags, {
-    Name = format("%s-vpce-%s", var.project, each.key)
+    Component = "vpc-endpoint"
+    Name      = format("%s-vpce-%s", var.project, each.key)
   })
 }
 
@@ -177,7 +214,8 @@ resource "aws_vpc_endpoint" "interface" {
   private_dns_enabled = true
 
   tags = merge(local.module_tags, {
-    Name = format("%s-vpce-%s", var.project, replace(each.key, "_", "-"))
+    Component = "vpc-endpoint"
+    Name      = format("%s-vpce-%s", var.project, replace(each.key, "_", "-"))
   })
 }
 
@@ -190,6 +228,7 @@ resource "aws_vpc_endpoint" "cognito_idp" {
   private_dns_enabled = true
 
   tags = merge(local.module_tags, {
-    Name = format("%s-vpce-cognito-idp", var.project)
+    Component = "vpc-endpoint"
+    Name      = format("%s-vpce-cognito-idp", var.project)
   })
 }

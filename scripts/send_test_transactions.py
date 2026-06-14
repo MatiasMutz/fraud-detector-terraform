@@ -74,6 +74,7 @@ package main
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -341,6 +342,7 @@ func makeTransaction(rng *rand.Rand, index, fraudPct int) (string, string, bool)
 	}
 
 	message := map[string]interface{}{
+		"trace_id":            randomTraceID(),
 		"transaction_id":      fmt.Sprintf("%d-%d", time.Now().UnixNano(), index),
 		"user_id":             userID,
 		"amount":              amount,
@@ -357,6 +359,16 @@ func makeTransaction(rng *rand.Rand, index, fraudPct int) (string, string, bool)
 	}
 	payload, _ := json.Marshal(message)
 	return string(payload), scenario, isFraud
+}
+
+func randomTraceID() string {
+	var b [16]byte
+	if _, err := cryptorand.Read(b[:]); err != nil {
+		return fmt.Sprintf("trace-%d", time.Now().UnixNano())
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 func featureBlob(rng *rand.Rand, isFraud bool, amount float64) map[string]float64 {

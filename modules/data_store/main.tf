@@ -2,7 +2,7 @@ data "aws_caller_identity" "current" {}
 
 locals {
   module_tags = merge(var.tags, {
-    Component = "data-store"
+    Service = "data-store"
   })
 
   table_name        = format("%s-user-behavior", var.project)
@@ -32,7 +32,8 @@ resource "aws_dynamodb_table" "user_behavior" {
   }
 
   tags = merge(local.module_tags, {
-    Name = local.table_name
+    Component = "dynamodb-table"
+    Name      = local.table_name
   })
 }
 
@@ -44,8 +45,9 @@ resource "aws_s3_bucket" "audit" {
   force_destroy = true
 
   tags = merge(local.module_tags, {
-    Name = local.audit_bucket_name
-    Role = "audit"
+    Component = "s3-bucket"
+    Name      = local.audit_bucket_name
+    Role      = "audit"
   })
 }
 
@@ -105,7 +107,8 @@ resource "aws_db_subnet_group" "results" {
   subnet_ids = var.private_subnet_ids
 
   tags = merge(local.module_tags, {
-    Name = format("%s-results-db-subnet-group", var.project)
+    Component = "db-subnet-group"
+    Name      = format("%s-results-db-subnet-group", var.project)
   })
 }
 
@@ -115,7 +118,8 @@ resource "aws_security_group" "rds" {
   vpc_id      = var.vpc_id
 
   tags = merge(local.module_tags, {
-    Name = format("%s-rds-sg", var.project)
+    Component = "security-group"
+    Name      = format("%s-rds-sg", var.project)
   })
 }
 
@@ -158,7 +162,8 @@ resource "aws_db_instance" "results" {
   }
 
   tags = merge(local.module_tags, {
-    Name = local.db_identifier
+    Component = "rds-instance"
+    Name      = local.db_identifier
   })
 }
 
@@ -171,7 +176,9 @@ resource "aws_secretsmanager_secret" "db_credentials" {
   recovery_window_in_days = 0
 
   tags = merge(local.module_tags, {
-    Name = format("%s-db-credentials", var.project)
+    Component = "secrets-manager-secret"
+    Name      = format("%s-db-credentials", var.project)
+    Role      = "db-credentials"
   })
 }
 
@@ -191,7 +198,8 @@ resource "aws_security_group" "proxy" {
   vpc_id      = var.vpc_id
 
   tags = merge(local.module_tags, {
-    Name = format("%s-proxy-sg", var.project)
+    Component = "security-group"
+    Name      = format("%s-proxy-sg", var.project)
   })
 }
 
@@ -215,7 +223,8 @@ resource "aws_db_proxy" "results" {
   }
 
   tags = merge(local.module_tags, {
-    Name = format("%s-results-proxy", var.project)
+    Component = "rds-proxy"
+    Name      = format("%s-results-proxy", var.project)
   })
 }
 

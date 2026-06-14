@@ -8,6 +8,18 @@ locals {
     ManagedBy = "terraform"
   }
 
+  service_tags = {
+    api = merge(local.common_tags, {
+      Service = "api"
+    })
+    data_store = merge(local.common_tags, {
+      Service = "data-store"
+    })
+    results_writer = merge(local.common_tags, {
+      Service = "results-writer"
+    })
+  }
+
   # Primeras dos AZs de la región (orden estable, conocido en plan) para
   # evitar count/for_each que dependan de random_shuffle.
   azs = slice(data.aws_availability_zones.available.names, 0, 2)

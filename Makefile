@@ -81,6 +81,7 @@ validate: $(PSYCOPG2_ZIP) build-results-writer
 			  -var="db_host=localhost" \
 			  -var="db_password=secret" \
 			  -var="sns_topic_arn=arn:aws:sns:us-east-1:123456789012:topic" \
+			  -var="user_behavior_table_name=test-user-behavior" \
 			  -var="jwt_issuer=https://cognito-idp.us-east-1.amazonaws.com/us-east-1_example" \
 			  -var="jwt_audience=client") || exit 1; \
 		elif [ "$$d" = "./modules/notification/summarizer" ]; then \

@@ -4,7 +4,7 @@ data "aws_region" "current" {}
 
 locals {
   module_tags = merge(var.tags, {
-    Component = "auth"
+    Service = "auth"
   })
 
   user_pool_name = format("%s-auth", var.project)
@@ -51,7 +51,8 @@ resource "aws_cognito_user_pool" "this" {
   }
 
   tags = merge(local.module_tags, {
-    Name = local.user_pool_name
+    Component = "cognito-user-pool"
+    Name      = local.user_pool_name
   })
 }
 

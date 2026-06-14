@@ -236,9 +236,24 @@ API REST protegida por Cognito para el dashboard.
 | PUT             | `/dashboard/me/password` | Cambio de contraseña (usuarios Cognito locales) |
 | GET             | `/stats`                 | Totales de transacciones                        |
 | GET             | `/transactions?limit=N`  | Últimas N transacciones (máx. 100)              |
+| GET             | `/transactions?trace_id=ID` | Busca transacciones por trace operativo      |
+| GET             | `/users/{id}`            | Resumen de fraude y últimas transacciones del usuario |
+| GET             | `/users/{id}/behavior`   | Perfil de comportamiento actual desde DynamoDB  |
 
 
 ---
+
+### Trazabilidad operativa
+
+Los productores sintéticos generan `trace_id` por transacción y el processor lo propaga a S3, SQS de resultados, RDS y API. Los logs de CloudWatch usan JSON con `trace_id` y métricas operativas, pero no emiten `transaction_id`, `user_id`, monto, país, canal, score, decisión, payloads ni receipt handles. La API también acepta y devuelve `X-Trace-Id` para correlacionar requests HTTP; las respuestas de transacciones muestran el `trace_id` operacional.
+
+Consulta base en Logs Insights:
+
+```sql
+fields @timestamp, component, action, trace_id, duration_ms
+| filter trace_id = "TRACE_ID_A_BUSCAR"
+| sort @timestamp asc
+```
 
 ### `modules/onprem_sim`
 

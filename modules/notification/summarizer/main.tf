@@ -2,7 +2,7 @@ data "aws_region" "current" {}
 
 locals {
   module_tags = merge(var.tags, {
-    Component = "notification-summarizer"
+    Service = "notification-summarizer"
   })
 
   function_name  = format("%s-fraud-summary", var.project)
@@ -21,7 +21,8 @@ resource "aws_cloudwatch_log_group" "summarizer" {
   retention_in_days = var.log_retention_days
 
   tags = merge(local.module_tags, {
-    Name = local.log_group_name
+    Component = "cloudwatch-log-group"
+    Name      = local.log_group_name
   })
 }
 
@@ -31,7 +32,8 @@ resource "aws_security_group" "summarizer" {
   vpc_id      = var.vpc_id
 
   tags = merge(local.module_tags, {
-    Name = format("%s-fraud-summary-sg", var.project)
+    Component = "security-group"
+    Name      = format("%s-fraud-summary-sg", var.project)
   })
 }
 
@@ -43,7 +45,9 @@ resource "aws_vpc_security_group_egress_rule" "summarizer_to_endpoints" {
   from_port                    = 443
   to_port                      = 443
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_lambda_function" "summarizer" {
@@ -80,7 +84,8 @@ resource "aws_lambda_function" "summarizer" {
   depends_on = [aws_cloudwatch_log_group.summarizer]
 
   tags = merge(local.module_tags, {
-    Name = local.function_name
+    Component = "lambda"
+    Name      = local.function_name
   })
 }
 
@@ -90,7 +95,8 @@ resource "aws_cloudwatch_event_rule" "schedule" {
   schedule_expression = local.schedule_expression
 
   tags = merge(local.module_tags, {
-    Name = local.schedule_name
+    Component = "eventbridge-rule"
+    Name      = local.schedule_name
   })
 }
 

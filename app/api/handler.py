@@ -4,6 +4,8 @@ import logging
 import os
 import re
 import uuid
+from time import perf_counter
+from urllib.parse import unquote
 
 import boto3
 import psycopg2
@@ -16,12 +18,13 @@ logger.setLevel(logging.INFO)
 HEADERS = {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "authorization,content-type,x-cognito-access-token",
+    "Access-Control-Allow-Headers": "authorization,content-type,x-cognito-access-token,x-trace-id",
     "Access-Control-Allow-Methods": "DELETE,GET,OPTIONS,POST,PUT",
     "Access-Control-Max-Age": "300",
 }
 
 _conn = None
+_dynamodb_client = None
 _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _SORTABLE_TX = {
     "transaction_id": "transaction_id",
@@ -34,6 +37,8 @@ _SORTABLE_TX = {
     "is_fraud": "is_fraud",
     "decision": "decision",
     "processed_at": "processed_at",
+    "trace_id": "trace_id",
+    "ingested_at": "ingested_at",
 }
 _SORTABLE_USERS = {
     "user_id": "user_id",
@@ -77,14 +82,22 @@ def _ensure_schema(conn):
                 fraud_score    FLOAT,
                 is_fraud       BOOLEAN,
                 decision       VARCHAR(20),
-                processed_at   TIMESTAMPTZ DEFAULT NOW()
+                processed_at   TIMESTAMPTZ DEFAULT NOW(),
+                trace_id       VARCHAR(128),
+                ingested_at    TIMESTAMPTZ
             );
+
+            ALTER TABLE transactions
+                ADD COLUMN IF NOT EXISTS trace_id VARCHAR(128),
+                ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ;
 
             CREATE INDEX IF NOT EXISTS idx_tx_processed_at ON transactions (processed_at DESC);
             CREATE INDEX IF NOT EXISTS idx_tx_is_fraud     ON transactions (is_fraud);
             CREATE INDEX IF NOT EXISTS idx_tx_user_id      ON transactions (user_id);
             CREATE INDEX IF NOT EXISTS idx_tx_country      ON transactions (country);
             CREATE INDEX IF NOT EXISTS idx_tx_channel      ON transactions (channel);
+            CREATE INDEX IF NOT EXISTS idx_tx_trace_id     ON transactions (trace_id);
+            CREATE INDEX IF NOT EXISTS idx_tx_ingested_at  ON transactions (ingested_at DESC);
 
             CREATE TABLE IF NOT EXISTS dashboard_access (
                 id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -151,6 +164,123 @@ def _headers(event):
     return {str(key).lower(): value for key, value in raw_headers.items() if value is not None}
 
 
+def _with_trace(response, trace_id):
+    headers = dict(response.get("headers") or {})
+    headers["X-Trace-Id"] = trace_id
+    response["headers"] = headers
+    return response
+
+
+def _request_trace_id(event):
+    header_trace_id = str(_headers(event).get("x-trace-id") or "").strip()
+    if _is_safe_trace_id(header_trace_id):
+        return header_trace_id[:128]
+    return str(uuid.uuid4())
+
+
+def _request_id(event, context):
+    request_id = ((event.get("requestContext") or {}).get("requestId") or "")
+    if request_id:
+        return request_id
+    return getattr(context, "aws_request_id", "") if context is not None else ""
+
+
+def _route_template(path, path_params):
+    if path in [
+      "/health",
+      "/dashboard/me",
+      "/dashboard/me/password",
+      "/dashboard/invites",
+      "/stats",
+      "/stats/timeseries",
+      "/filters",
+      "/transactions",
+      "/users"
+    ] :
+        return path
+    if path.startswith("/dashboard/invites/") and path_params.get("id"):
+        return "/dashboard/invites/{id}"
+    if path.startswith("/transactions/") and path_params.get("id"):
+        return "/transactions/{id}"
+    if path.startswith("/users/") and path.endswith("/behavior"):
+        return "/users/{id}/behavior"
+    if path.startswith("/users/") and path_params.get("id"):
+        return "/users/{id}"
+    return "unknown"
+
+
+def _response_row_count(response):
+    try:
+        body = response.get("body")
+        if not body:
+            return None
+        parsed = json.loads(body)
+        data = parsed.get("data") if isinstance(parsed, dict) else None
+        if isinstance(data, list):
+            return len(data)
+        if isinstance(data, dict) and "recent_transactions" in data and isinstance(data["recent_transactions"], list):
+            return len(data["recent_transactions"])
+    except Exception:
+        return None
+    return None
+
+
+def _safe_log(action, **fields):
+    record = {
+        "level": fields.pop("level", "INFO"),
+        "component": "api",
+        "action": action,
+    }
+    for key, value in fields.items():
+        if value is None or _is_sensitive_log_key(key):
+            continue
+        record[key] = value
+    logger.info(json.dumps(record, default=str))
+
+
+safe_log = _safe_log
+
+
+def _is_sensitive_log_key(key):
+    return key in {
+        "transaction_id",
+        "user_id",
+        "amount",
+        "currency",
+        "country",
+        "channel",
+        "destination_account",
+        "fraud_score",
+        "decision",
+        "payload",
+        "body",
+        "query",
+        "email",
+        "auth_claims",
+    }
+
+
+def _error_class(exc):
+    return exc.__class__.__name__
+
+
+def _is_safe_trace_id(value):
+    value = str(value or "").strip()
+    if not value or len(value) > 128:
+        return False
+    if value.startswith("legacy-"):
+        suffix = value[len("legacy-") :]
+        return len(suffix) == 32 and all(char in "0123456789abcdef" for char in suffix)
+    if value.startswith("sqs-"):
+        suffix = value[len("sqs-") :]
+        return len(suffix) == 32 and all(char in "0123456789abcdef" for char in suffix)
+    try:
+        uuid.UUID(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def _is_truthy(value):
     if isinstance(value, bool):
         return value
@@ -173,6 +303,121 @@ def _serialize_row(row):
         elif hasattr(value, "isoformat"):
             out[key] = value.isoformat()
     return out
+
+
+def _get_dynamodb_client():
+    global _dynamodb_client
+    if _dynamodb_client is None:
+        _dynamodb_client = boto3.client("dynamodb", region_name=os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION"))
+    return _dynamodb_client
+
+
+def _user_behavior_table_name():
+    return (os.getenv("USER_BEHAVIOR_TABLE_NAME") or os.getenv("DYNAMODB_TABLE_NAME") or "").strip()
+
+
+def _dynamodb_value(value):
+    if not isinstance(value, dict):
+        return value
+    if "S" in value:
+        return value["S"]
+    if "N" in value:
+        raw = value["N"]
+        try:
+            parsed = decimal.Decimal(raw)
+        except decimal.InvalidOperation:
+            return raw
+        if parsed == parsed.to_integral_value():
+            return int(parsed)
+        return float(parsed)
+    if "BOOL" in value:
+        return bool(value["BOOL"])
+    if "NULL" in value:
+        return None
+    if "L" in value:
+        return [_dynamodb_value(item) for item in value["L"]]
+    if "M" in value:
+        return {key: _dynamodb_value(item) for key, item in value["M"].items()}
+    return None
+
+
+def _deserialize_dynamodb_item(item):
+    return {key: _dynamodb_value(value) for key, value in (item or {}).items()}
+
+
+def _as_float(value):
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_int(value):
+    if value in (None, ""):
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _as_string_list(value):
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item not in (None, "")]
+
+
+def _empty_user_behavior_profile(user_id):
+    return {
+        "user_id": user_id,
+        "has_profile": False,
+        "avg_amount": None,
+        "std_dev_amount": None,
+        "tx_count": 0,
+        "tx_last_hour": 0,
+        "tx_last_10min": 0,
+        "typical_countries": [],
+        "typical_channels": [],
+        "known_destinations": [],
+        "last_country": "",
+        "last_timestamp": None,
+    }
+
+
+def _serialize_user_behavior_profile(user_id, item):
+    if not item:
+        return _empty_user_behavior_profile(user_id)
+
+    profile = _deserialize_dynamodb_item(item)
+    return {
+        "user_id": str(profile.get("user_id") or user_id),
+        "has_profile": True,
+        "avg_amount": _as_float(profile.get("avg_amount")),
+        "std_dev_amount": _as_float(profile.get("std_dev_amount")),
+        "tx_count": _as_int(profile.get("tx_count")),
+        "tx_last_hour": _as_int(profile.get("tx_last_hour")),
+        "tx_last_10min": _as_int(profile.get("tx_last_10min")),
+        "typical_countries": _as_string_list(profile.get("typical_countries")),
+        "typical_channels": _as_string_list(profile.get("typical_channels")),
+        "known_destinations": _as_string_list(profile.get("known_destinations")),
+        "last_country": str(profile.get("last_country") or ""),
+        "last_timestamp": profile.get("last_timestamp"),
+    }
+
+
+def _path_user_id(path, path_params, *, suffix=""):
+    if path_params.get("id"):
+        return str(path_params["id"])
+    if not path.startswith("/users/"):
+        return ""
+    body = path[len("/users/") :]
+    if suffix:
+        if not body.endswith(suffix):
+            return ""
+        body = body[: -len(suffix)]
+    return unquote(body).strip()
 
 
 def _json_body(event):
@@ -224,6 +469,10 @@ def _build_where(query, extra_filters=None, extra_params=None):
     if query.get("user_id"):
         filters.append("user_id = %s")
         params.append(query["user_id"])
+    trace_id = str(query.get("trace_id") or "").strip()
+    if _is_safe_trace_id(trace_id):
+        filters.append("trace_id = %s")
+        params.append(trace_id[:128])
     if query.get("country"):
         filters.append("country = %s")
         params.append(query["country"])
@@ -405,16 +654,7 @@ def _try_subscribe_summary_for_access(cur, row):
     try:
         subscription_arn = _subscribe_summary_email(row["email"])
     except Exception as exc:
-        logger.warning(
-            json.dumps(
-                {
-                    "action": "summary_sns_subscribe_failed",
-                    "access_id": str(row["id"]),
-                    "email": row["email_normalized"],
-                    "error": str(exc),
-                }
-            )
-        )
+        _safe_log("summary_sns_subscribe_failed", level="WARN", error_class=_error_class(exc))
         return _set_summary_subscription(
             cur,
             row["id"],
@@ -434,15 +674,7 @@ def _try_subscribe_summary_standalone(email):
     try:
         subscription_arn = _subscribe_summary_email(email)
     except Exception as exc:
-        logger.warning(
-            json.dumps(
-                {
-                    "action": "summary_sns_bootstrap_subscribe_failed",
-                    "email": _normalize_email(email),
-                    "error": str(exc),
-                }
-            )
-        )
+        _safe_log("summary_sns_bootstrap_subscribe_failed", level="WARN", error_class=_error_class(exc))
         return {
             "email": email,
             "status": "subscribe_failed",
@@ -623,7 +855,7 @@ def _health():
             cur.execute("SELECT 1")
         return _ok({"status": "ok"})
     except Exception as exc:
-        logger.error(str(exc))
+        _safe_log("api_health_failed", level="ERROR", error_class=_error_class(exc))
         return _err(503, "SERVICE_UNAVAILABLE", "Database unreachable")
 
 
@@ -730,7 +962,7 @@ def _list_transactions(query):
         cur.execute(
             f"""
             SELECT transaction_id, user_id, amount, currency, country, channel,
-                   fraud_score, is_fraud, decision, processed_at
+                   fraud_score, is_fraud, decision, processed_at, trace_id, ingested_at
             FROM   transactions
             {where}
             ORDER  BY {sort_col} {sort_dir} NULLS LAST
@@ -759,7 +991,7 @@ def _get_transaction(tx_id):
         cur.execute(
             """
             SELECT transaction_id, user_id, amount, currency, country, channel,
-                   fraud_score, is_fraud, decision, processed_at
+                   fraud_score, is_fraud, decision, processed_at, trace_id, ingested_at
             FROM   transactions WHERE transaction_id = %s
             """,
             (tx_id,),
@@ -867,7 +1099,7 @@ def _get_user(user_id):
         cur.execute(
             """
             SELECT transaction_id, amount, currency, country, channel,
-                   fraud_score, is_fraud, decision, processed_at
+                   fraud_score, is_fraud, decision, processed_at, trace_id, ingested_at
             FROM   transactions WHERE user_id = %s ORDER BY processed_at DESC LIMIT 10
             """,
             (user_id,),
@@ -875,6 +1107,24 @@ def _get_user(user_id):
         summary["recent_transactions"] = [_serialize_row(r) for r in cur.fetchall()]
 
     return _ok(summary)
+
+
+def _get_user_behavior(user_id):
+    table_name = _user_behavior_table_name()
+    if not table_name:
+        return _err(503, "BEHAVIOR_TABLE_NOT_CONFIGURED", "User behavior table is not configured")
+
+    try:
+        response = _get_dynamodb_client().get_item(
+            TableName=table_name,
+            Key={"user_id": {"S": user_id}},
+            ConsistentRead=False,
+        )
+    except ClientError as exc:
+        _safe_log("user_behavior_load_failed", level="WARN", error_class=_error_class(exc))
+        return _err(502, "BEHAVIOR_PROFILE_UNAVAILABLE", "User behavior profile is unavailable")
+
+    return _ok(_serialize_user_behavior_profile(user_id, response.get("Item")))
 
 
 def _list_dashboard_invites(access):
@@ -1053,16 +1303,7 @@ def _delete_dashboard_invite(access, invite_id):
                 try:
                     _unsubscribe_summary_email(row["summary_sns_subscription_arn"])
                 except Exception as exc:
-                    logger.warning(
-                        json.dumps(
-                            {
-                                "action": "summary_sns_unsubscribe_failed",
-                                "access_id": str(row["id"]),
-                                "email": row["email_normalized"],
-                                "error": str(exc),
-                            }
-                        )
-                    )
+                    _safe_log("summary_sns_unsubscribe_failed", level="WARN", error_class=_error_class(exc))
                     row = _set_summary_subscription(
                         cur,
                         row["id"],
@@ -1142,65 +1383,92 @@ def _change_dashboard_password(access, event):
 
 # ── Router ────────────────────────────────────────────────────────────────────
 
-def handler(event, context):
-    if event.get("action") == "bootstrap_dashboard_admin":
-        return _bootstrap_dashboard_admin(event)
+def _dispatch_request(event, path, query, path_params, method):
+    if method == "OPTIONS":
+        return _preflight()
 
+    if path == "/health":
+        return _health()
+
+    protected_access = None
+    protected_identity = None
+
+    if path != "/health":
+        auth_result, auth_error = _authorize_access(event, activate_pending=(path == "/dashboard/me"))
+        if auth_error is not None:
+            return auth_error
+        protected_identity = auth_result["identity"]
+        protected_access = auth_result["access"]
+
+    if path == "/dashboard/me":
+        return _get_dashboard_me(protected_access, protected_identity)
+    if path == "/dashboard/me/password" and method == "PUT":
+        return _change_dashboard_password(protected_access, event)
+    if path == "/dashboard/invites" and method == "GET":
+        return _list_dashboard_invites(protected_access)
+    if path == "/dashboard/invites" and method == "POST":
+        body = _json_body(event)
+        if body is None:
+            return _err(400, "INVALID_JSON", "Request body must be valid JSON")
+        return _upsert_dashboard_invite(protected_access, body)
+    if path.startswith("/dashboard/invites/") and path_params.get("id") and method == "DELETE":
+        return _delete_dashboard_invite(protected_access, path_params["id"])
+
+    if path == "/stats":
+        return _get_stats(query)
+    if path == "/stats/timeseries":
+        return _get_stats_timeseries(query)
+    if path == "/filters":
+        return _get_filters()
+    if path == "/transactions":
+        return _list_transactions(query)
+    if path_params.get("id") and path.startswith("/transactions/"):
+        return _get_transaction(path_params["id"])
+    if path == "/users":
+        return _list_users(query)
+    if path.startswith("/users/") and path.endswith("/behavior") and method == "GET":
+        user_id = _path_user_id(path, path_params, suffix="/behavior")
+        if not user_id:
+            return _err(400, "USER_ID_REQUIRED", "User id is required")
+        return _get_user_behavior(user_id)
+    if path_params.get("id") and path.startswith("/users/"):
+        return _get_user(path_params["id"])
+
+    return _err(404, "NOT_FOUND", "Route not found")
+
+
+def handler(event, context):
+    started = perf_counter()
+    trace_id = _request_trace_id(event)
+    request_id = _request_id(event, context)
     path = event.get("rawPath", "")
     query = event.get("queryStringParameters") or {}
     path_params = event.get("pathParameters") or {}
     method = ((event.get("requestContext") or {}).get("http") or {}).get("method", "")
-
-    logger.info(json.dumps({"action": "api_request", "path": path, "query": query}))
+    route = _route_template(path, path_params)
+    error_class = None
 
     try:
-        if method == "OPTIONS":
-            return _preflight()
-
-        if path == "/health":
-            return _health()
-
-        protected_access = None
-        protected_identity = None
-
-        if path != "/health":
-            auth_result, auth_error = _authorize_access(event, activate_pending=(path == "/dashboard/me"))
-            if auth_error is not None:
-                return auth_error
-            protected_identity = auth_result["identity"]
-            protected_access = auth_result["access"]
-
-        if path == "/dashboard/me":
-            return _get_dashboard_me(protected_access, protected_identity)
-        if path == "/dashboard/me/password" and method == "PUT":
-            return _change_dashboard_password(protected_access, event)
-        if path == "/dashboard/invites" and method == "GET":
-            return _list_dashboard_invites(protected_access)
-        if path == "/dashboard/invites" and method == "POST":
-            body = _json_body(event)
-            if body is None:
-                return _err(400, "INVALID_JSON", "Request body must be valid JSON")
-            return _upsert_dashboard_invite(protected_access, body)
-        if path.startswith("/dashboard/invites/") and path_params.get("id") and method == "DELETE":
-            return _delete_dashboard_invite(protected_access, path_params["id"])
-
-        if path == "/stats":
-            return _get_stats(query)
-        if path == "/stats/timeseries":
-            return _get_stats_timeseries(query)
-        if path == "/filters":
-            return _get_filters()
-        if path == "/transactions":
-            return _list_transactions(query)
-        if path_params.get("id") and path.startswith("/transactions/"):
-            return _get_transaction(path_params["id"])
-        if path == "/users":
-            return _list_users(query)
-        if path_params.get("id") and path.startswith("/users/"):
-            return _get_user(path_params["id"])
-
-        return _err(404, "NOT_FOUND", f"No route for {path}")
-
+        if event.get("action") == "bootstrap_dashboard_admin":
+            method = "INVOKE"
+            route = "bootstrap_dashboard_admin"
+            response = _bootstrap_dashboard_admin(event)
+        else:
+            response = _dispatch_request(event, path, query, path_params, method)
     except Exception as exc:
-        logger.exception("unhandled error")
-        return _err(500, "INTERNAL_ERROR", str(exc))
+        error_class = _error_class(exc)
+        response = _err(500, "INTERNAL_ERROR", "Internal server error")
+
+    response = _with_trace(response, trace_id)
+    _safe_log(
+        "api_request_completed",
+        trace_id=trace_id,
+        request_id=request_id,
+        method=method,
+        route=route,
+        status_code=response.get("statusCode"),
+        row_count=_response_row_count(response),
+        error_class=error_class,
+        duration_ms=round((perf_counter() - started) * 1000),
+    )
+    return response

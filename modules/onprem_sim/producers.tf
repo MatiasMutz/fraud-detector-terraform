@@ -29,7 +29,8 @@ resource "aws_security_group" "producer" {
   vpc_id      = aws_vpc.onprem.id
 
   tags = merge(local.module_tags, {
-    Name = format("%s-producer-sg", local.name_prefix)
+    Component = "security-group"
+    Name      = format("%s-producer-sg", local.name_prefix)
   })
 }
 
@@ -43,7 +44,9 @@ resource "aws_vpc_security_group_egress_rule" "producer_https_aws_vpc" {
   from_port         = 443
   to_port           = 443
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_vpc_security_group_egress_rule" "producer_https_internet" {
@@ -56,7 +59,9 @@ resource "aws_vpc_security_group_egress_rule" "producer_https_internet" {
   from_port         = 443
   to_port           = 443
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_instance" "producer" {
@@ -95,9 +100,10 @@ resource "aws_instance" "producer" {
   user_data_replace_on_change = true
 
   tags = merge(local.module_tags, {
-    Name  = format("%s-%s", local.name_prefix, each.key)
-    Role  = "traffic-producer"
-    Index = each.key
+    Component = "ec2-instance"
+    Name      = format("%s-%s", local.name_prefix, each.key)
+    Role      = "traffic-producer"
+    Index     = each.key
   })
 
   depends_on = [

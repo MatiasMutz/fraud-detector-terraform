@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 func TestTransactionJSONContract(t *testing.T) {
 	body := `{
 		"transaction_id": "tx_1",
+		"trace_id": "11111111-1111-4111-8111-111111111111",
 		"user_id": "user_1",
 		"amount": 42.5,
 		"currency": "ARS",
@@ -34,6 +36,9 @@ func TestTransactionJSONContract(t *testing.T) {
 	}
 	if tx.TransactionID != "tx_1" {
 		t.Fatalf("transaction_id = %q, want tx_1", tx.TransactionID)
+	}
+	if tx.TraceID != "11111111-1111-4111-8111-111111111111" {
+		t.Fatalf("trace_id = %q, want UUID trace", tx.TraceID)
 	}
 	if tx.UserID != "user_1" {
 		t.Fatalf("user_id = %q, want user_1", tx.UserID)
@@ -85,6 +90,7 @@ func TestProcessMessageSendsEveryResultToResultsQueue(t *testing.T) {
 	engine := fakeScorer{fraudScore: 0.42, isFraud: false}
 	msg := workerMessage(`{
 		"transaction_id": "tx_ok",
+		"trace_id": "22222222-2222-4222-8222-222222222222",
 		"user_id": "user_1",
 		"amount": 42.5,
 		"currency": "ARS",
@@ -108,8 +114,14 @@ func TestProcessMessageSendsEveryResultToResultsQueue(t *testing.T) {
 	if result.TransactionID != "tx_ok" || result.IsFraud {
 		t.Fatalf("result = %+v, want tx_ok non-fraud", result)
 	}
+	if result.TraceID != "22222222-2222-4222-8222-222222222222" {
+		t.Fatalf("trace_id = %q, want UUID trace", result.TraceID)
+	}
 	if _, err := time.Parse(time.RFC3339, result.ProcessedAt); err != nil {
 		t.Fatalf("processed_at = %q, want RFC3339 timestamp: %v", result.ProcessedAt, err)
+	}
+	if _, err := time.Parse(time.RFC3339, result.IngestedAt); err != nil {
+		t.Fatalf("ingested_at = %q, want RFC3339 timestamp: %v", result.IngestedAt, err)
 	}
 	if len(queue.deleted) != 1 || queue.deleted[0].queueURL != "ingestion-url" {
 		t.Fatalf("deleted = %+v, want original ingestion message deleted", queue.deleted)
@@ -122,6 +134,7 @@ func TestProcessMessageSendsFraudResultToBothOutputQueues(t *testing.T) {
 	engine := fakeScorer{fraudScore: 0.98, isFraud: true}
 	msg := workerMessage(`{
 		"transaction_id": "tx_fraud",
+		"trace_id": "33333333-3333-4333-8333-333333333333",
 		"user_id": "user_1",
 		"amount": 9000,
 		"currency": "ARS",
@@ -151,6 +164,9 @@ func TestProcessMessageSendsFraudResultToBothOutputQueues(t *testing.T) {
 	if !result.IsFraud || result.FraudScore != 0.98 {
 		t.Fatalf("fraud result = %+v, want fraud score 0.98", result)
 	}
+	if result.TraceID != "33333333-3333-4333-8333-333333333333" {
+		t.Fatalf("trace_id = %q, want UUID trace", result.TraceID)
+	}
 	if len(queue.deleted) != 1 {
 		t.Fatalf("deleted messages = %d, want 1", len(queue.deleted))
 	}
@@ -163,6 +179,7 @@ func TestProcessMessageKeepsOriginalMessageWhenFraudAlertSendFails(t *testing.T)
 	engine := fakeScorer{fraudScore: 0.98, isFraud: true}
 	msg := workerMessage(`{
 		"transaction_id": "tx_retry",
+		"trace_id": "44444444-4444-4444-8444-444444444444",
 		"user_id": "user_1",
 		"amount": 9000,
 		"currency": "ARS",
@@ -181,6 +198,101 @@ func TestProcessMessageKeepsOriginalMessageWhenFraudAlertSendFails(t *testing.T)
 	}
 	if len(queue.deleted) != 0 {
 		t.Fatalf("deleted messages = %d, want 0", len(queue.deleted))
+	}
+}
+
+func TestProcessMessageGeneratesPrivacySafeFallbackTraceID(t *testing.T) {
+	queue := &fakeQueueClient{}
+	store := &fakeProfileStore{}
+	engine := fakeScorer{fraudScore: 0.42, isFraud: false}
+	msg := workerMessage(`{
+		"transaction_id": "tx_without_trace",
+		"user_id": "user_1",
+		"amount": 42.5,
+		"currency": "ARS",
+		"timestamp": "2026-04-03T10:22:00Z",
+		"channel": "web",
+		"destination_account": "dest_1",
+		"country": "AR"
+	}`)
+
+	err := processMessage(context.Background(), msg, queue, store, nil, engine, &userLockSet{}, "ingestion-url", "results-url", "fraud-url")
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	result := decodeResult(t, queue.sent[0].body)
+	if result.TraceID == "" {
+		t.Fatal("trace_id is empty")
+	}
+	if result.TraceID == "tx_without_trace" {
+		t.Fatal("fallback trace_id leaked the raw transaction_id")
+	}
+	if got, want := result.TraceID, ensureTraceID(Transaction{TransactionID: "tx_without_trace"}, msg); got != want {
+		t.Fatalf("trace_id = %q, want %q", got, want)
+	}
+}
+
+func TestProcessMessageRejectsUnsafeProvidedTraceID(t *testing.T) {
+	queue := &fakeQueueClient{}
+	store := &fakeProfileStore{}
+	engine := fakeScorer{fraudScore: 0.42, isFraud: false}
+	msg := workerMessage(`{
+		"trace_id": "tx_secret_as_trace",
+		"transaction_id": "tx_secret_as_trace",
+		"user_id": "user_1",
+		"amount": 42.5,
+		"currency": "ARS",
+		"timestamp": "2026-04-03T10:22:00Z",
+		"channel": "web",
+		"destination_account": "dest_1",
+		"country": "AR"
+	}`)
+
+	err := processMessage(context.Background(), msg, queue, store, nil, engine, &userLockSet{}, "ingestion-url", "results-url", "fraud-url")
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	result := decodeResult(t, queue.sent[0].body)
+	if result.TraceID == "tx_secret_as_trace" {
+		t.Fatal("unsafe provided trace_id was propagated")
+	}
+	if got, want := result.TraceID, ensureTraceID(Transaction{TraceID: "tx_secret_as_trace", TransactionID: "tx_secret_as_trace"}, msg); got != want {
+		t.Fatalf("trace_id = %q, want %q", got, want)
+	}
+}
+
+func TestProcessorLogRecordOmitsSensitiveFields(t *testing.T) {
+	record := processorLogRecord("tx_processed", map[string]any{
+		"trace_id":            "trace-safe",
+		"transaction_id":      "tx-secret",
+		"user_id":             "user-secret",
+		"amount":              99.5,
+		"currency":            "ARS",
+		"country":             "AR",
+		"channel":             "web",
+		"destination_account": "dest-secret",
+		"fraud_score":         0.98,
+		"decision":            "block",
+		"receipt_handle":      "receipt-secret",
+		"duration_ms":         10,
+	})
+
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("json.Marshal(record) error = %v", err)
+	}
+	body := string(encoded)
+	for _, forbidden := range []string{
+		"tx-secret", "user-secret", "99.5", "ARS", "AR", "web",
+		"dest-secret", "0.98", "block", "receipt-secret",
+		"transaction_id", "user_id", "fraud_score",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("log record leaked %q: %s", forbidden, body)
+		}
+	}
+	if !strings.Contains(body, "trace-safe") {
+		t.Fatalf("log record missing trace id: %s", body)
 	}
 }
 
@@ -251,7 +363,12 @@ func (c *fakeQueueClient) SendMessage(_ context.Context, input *sqs.SendMessageI
 func workerMessage(body string) sqstypes.Message {
 	return sqstypes.Message{
 		Body:          aws.String(body),
+		MessageId:     aws.String("message-1"),
 		ReceiptHandle: aws.String("receipt-1"),
+		Attributes: map[string]string{
+			"ApproximateReceiveCount": "1",
+			"SentTimestamp":           "1775211720000",
+		},
 	}
 }
 

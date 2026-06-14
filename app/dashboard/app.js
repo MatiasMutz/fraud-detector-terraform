@@ -144,6 +144,19 @@
     const [cls, label] = map[key] || ["", d || "—"];
     return `<span class="pill ${cls}">${esc(label)}</span>`;
   }
+  function traceCell(tx) {
+    const traceId = textOrEmpty(tx?.trace_id);
+    if (!traceId) return '<span class="mono">—</span>';
+    return `<button type="button" class="trace-copy mono" data-trace="${esc(traceId)}" title="Copiar trace ID">${esc(traceId)}</button>`;
+  }
+  async function copyTraceId(traceId) {
+    if (!traceId || !navigator.clipboard?.writeText) return;
+    try {
+      await navigator.clipboard.writeText(traceId);
+    } catch (_) {
+      // Clipboard failures are non-critical; the visible trace id remains selectable.
+    }
+  }
   function kpiCard(value, label, variant) {
     return `<div class="kpi-card${variant ? " " + variant : ""}"><div class="kpi-value">${esc(String(value))}</div><div class="kpi-label">${esc(label)}</div></div>`;
   }
@@ -334,6 +347,9 @@
       Accept: "application/json",
       ...headers,
     };
+    if (!requestHeaders["X-Trace-Id"] && !requestHeaders["x-trace-id"]) {
+      requestHeaders["X-Trace-Id"] = newTraceId();
+    }
     if (auth) Object.assign(requestHeaders, buildAuthHeaders());
     const init = { method, headers: requestHeaders };
     if (body != null) {
@@ -360,6 +376,15 @@
       throw err;
     }
     return payload;
+  }
+
+  function newTraceId() {
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    try {
+      return randomUrlSafeString(16);
+    } catch (_) {
+      return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    }
   }
 
   function normalizeEnvelope(payload) {
@@ -1188,11 +1213,12 @@
     const tbody = document.querySelector("#recent-fraud-table tbody");
     if (!tbody) return;
     if (!rows || rows.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8" class="empty-row">Sin transacciones fraudulentas recientes.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="9" class="empty-row">Sin transacciones fraudulentas recientes.</td></tr>';
       return;
     }
     tbody.innerHTML = rows.map(tx => `<tr>
       <td class="mono">${esc(tx.transaction_id)}</td>
+      <td>${traceCell(tx)}</td>
       <td>${esc(tx.user_id)}</td>
       <td>${esc(fmtAmount(tx.amount, tx.currency))}</td>
       <td>${esc(tx.country)}</td>
@@ -1206,7 +1232,7 @@
   // ── Transactions ───────────────────────────────────────────────────────────
   async function loadTransactions() {
     clearErr("transactions");
-    $("tx-tbody").innerHTML = '<tr><td colspan="8" class="loading-row">Cargando…</td></tr>';
+    $("tx-tbody").innerHTML = '<tr><td colspan="9" class="loading-row">Cargando…</td></tr>';
     const extra = {
       limit:      txState.limit,
       offset:     txState.offset,
@@ -1229,10 +1255,11 @@
   function renderTxTable(rows, meta) {
     const tbody = $("tx-tbody");
     if (!rows || rows.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8" class="empty-row">Sin resultados para los filtros aplicados.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="9" class="empty-row">Sin resultados para los filtros aplicados.</td></tr>';
     } else {
       tbody.innerHTML = rows.map(tx => `<tr>
         <td class="mono">${esc(tx.transaction_id)}</td>
+        <td>${traceCell(tx)}</td>
         <td>${esc(tx.user_id)}</td>
         <td>${esc(fmtAmount(tx.amount, tx.currency))}</td>
         <td>${esc(tx.country)}</td>
@@ -1297,23 +1324,88 @@
     }
   }
 
+  async function loadUserBehaviorProfile(userId) {
+    const res = await apiFetch("/users/" + encodeURIComponent(userId) + "/behavior");
+    return normalizeEnvelope(res) || {};
+  }
+
+  function behaviorSummaryItem(label, value) {
+    return `<div class="summary-item"><span class="summary-label">${esc(label)}</span><span class="summary-value">${esc(value)}</span></div>`;
+  }
+
+  function behaviorTags(values, limit = 8) {
+    if (!Array.isArray(values) || values.length === 0) {
+      return '<p class="behavior-empty">Sin datos.</p>';
+    }
+    const shown = values.slice(0, limit);
+    const extra = values.length - shown.length;
+    const tags = shown.map(value => `<span class="behavior-tag">${esc(value)}</span>`);
+    if (extra > 0) tags.push(`<span class="behavior-tag">+${extra} más</span>`);
+    return `<div class="behavior-tags">${tags.join("")}</div>`;
+  }
+
+  function renderBehaviorPanel(profile, errorMessage = "") {
+    if (errorMessage) {
+      return `
+        <div class="behavior-panel">
+          <h4>Perfil de comportamiento actual</h4>
+          <p class="error-text">${esc(errorMessage)}</p>
+        </div>`;
+    }
+    if (!profile || profile.has_profile === false) {
+      return `
+        <div class="behavior-panel">
+          <h4>Perfil de comportamiento actual</h4>
+          <p class="behavior-empty">Este usuario todavía no tiene un perfil histórico en DynamoDB.</p>
+        </div>`;
+    }
+    return `
+      <div class="behavior-panel">
+        <h4>Perfil de comportamiento actual</h4>
+        <div class="summary-grid">
+          ${behaviorSummaryItem("Monto prom.", fmtAmount(profile.avg_amount))}
+          ${behaviorSummaryItem("Desvío monto", fmtAmount(profile.std_dev_amount))}
+          ${behaviorSummaryItem("Transacciones", fmt(profile.tx_count))}
+          ${behaviorSummaryItem("Última hora", fmt(profile.tx_last_hour))}
+          ${behaviorSummaryItem("Últimos 10 min", fmt(profile.tx_last_10min))}
+          ${behaviorSummaryItem("Último país", profile.last_country || "—")}
+          ${behaviorSummaryItem("Última actividad", fmtDate(profile.last_timestamp))}
+        </div>
+        <h4>Países típicos</h4>
+        ${behaviorTags(profile.typical_countries)}
+        <h4>Canales típicos</h4>
+        ${behaviorTags(profile.typical_channels)}
+        <h4>Destinos conocidos</h4>
+        ${behaviorTags(profile.known_destinations, 10)}
+      </div>`;
+  }
+
   async function openUserModal(userId) {
     $("user-modal-title").textContent = userId;
     $("user-modal-body").innerHTML = '<p class="loading-row">Cargando…</p>';
     $("user-modal").showModal();
     try {
-      const res = await apiFetch("/users/" + encodeURIComponent(userId));
+      const encodedUserId = encodeURIComponent(userId);
+      const [res, behaviorResult] = await Promise.all([
+        apiFetch("/users/" + encodedUserId),
+        loadUserBehaviorProfile(userId)
+          .then(profile => ({ profile }))
+          .catch(error => ({ error })),
+      ]);
       const u = normalizeEnvelope(res) || {};
+      const behaviorError = behaviorResult.error?.message || "";
+      const behaviorPanel = renderBehaviorPanel(behaviorResult.profile, behaviorError);
       const rate = u.total_transactions > 0 ? ((u.fraud_count / u.total_transactions) * 100).toFixed(1) + "%" : "0%";
       const txRows = (u.recent_transactions || []).map(tx => `<tr>
         <td class="mono">${esc(tx.transaction_id)}</td>
+        <td>${traceCell(tx)}</td>
         <td>${esc(fmtAmount(tx.amount, tx.currency))}</td>
         <td>${esc(tx.country)}</td>
         <td>${esc(tx.channel)}</td>
         <td>${esc(fmtFraudScore(txFraudScore(tx)))}</td>
         <td>${decisionPill(tx.decision)}</td>
         <td>${esc(fmtDate(tx.processed_at))}</td>
-      </tr>`).join("") || '<tr><td colspan="7" class="empty-row">Sin transacciones.</td></tr>';
+      </tr>`).join("") || '<tr><td colspan="8" class="empty-row">Sin transacciones.</td></tr>';
 
       $("user-modal-body").innerHTML = `
         <div class="user-kpis">
@@ -1322,10 +1414,11 @@
           ${kpiCard(rate, "Tasa fraude", u.fraud_count > 0 ? "danger" : "")}
           ${kpiCard(fmtFraudScore(u.avg_fraud_score), "Score prom.", "")}
         </div>
+        ${behaviorPanel}
         <h4>Últimas 10 transacciones</h4>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>ID</th><th>Monto</th><th>País</th><th>Canal</th><th>Score</th><th>Decisión</th><th>Procesada</th></tr></thead>
+            <thead><tr><th>ID</th><th>Trace</th><th>Monto</th><th>País</th><th>Canal</th><th>Score</th><th>Decisión</th><th>Procesada</th></tr></thead>
             <tbody>${txRows}</tbody>
           </table>
         </div>`;
@@ -1550,6 +1643,13 @@
     if (accountLogoutFallback) accountLogoutFallback.addEventListener("click", doLogout);
     const settingsButton = $("btn-settings");
     if (settingsButton) settingsButton.addEventListener("click", openAccountModal);
+    document.addEventListener("click", e => {
+      const button = e.target.closest(".trace-copy");
+      if (!button) return;
+      e.preventDefault();
+      e.stopPropagation();
+      copyTraceId(button.dataset.trace || "");
+    });
     $("btn-refresh").addEventListener("click", () => {
       const active = document.querySelector(".tab-btn.active");
       if (active) setTab(active.dataset.tab);

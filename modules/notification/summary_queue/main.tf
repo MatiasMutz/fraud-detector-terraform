@@ -1,6 +1,6 @@
 locals {
   module_tags = merge(var.tags, {
-    Component = "notification-summary-queue"
+    Service = "notification-summary-queue"
   })
 
   queue_name = format("%s-fraud-alerts", var.project)
@@ -14,8 +14,9 @@ resource "aws_sqs_queue" "dlq" {
   sqs_managed_sse_enabled   = true
 
   tags = merge(local.module_tags, {
-    Name = local.dlq_name
-    Role = "dlq"
+    Component = "sqs-queue"
+    Name      = local.dlq_name
+    Role      = "dlq"
   })
 }
 
@@ -41,8 +42,9 @@ resource "aws_sqs_queue" "main" {
   })
 
   tags = merge(local.module_tags, {
-    Name = local.queue_name
-    Role = "primary"
+    Component = "sqs-queue"
+    Name      = local.queue_name
+    Role      = "primary"
   })
 }
 

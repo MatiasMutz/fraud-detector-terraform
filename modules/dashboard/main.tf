@@ -3,7 +3,7 @@ data "aws_caller_identity" "current" {}
 
 locals {
   module_tags = merge(var.tags, {
-    Component = "dashboard"
+    Service = "dashboard"
   })
 
   bucket_name         = format("%s-dashboard-%s", var.project, data.aws_caller_identity.current.account_id)
@@ -19,7 +19,8 @@ resource "aws_s3_bucket" "dashboard" {
   force_destroy = true
 
   tags = merge(local.module_tags, {
-    Name = local.bucket_name
+    Component = "s3-bucket"
+    Name      = local.bucket_name
   })
 }
 
@@ -85,7 +86,9 @@ resource "aws_s3_object" "index_html" {
   content_type  = "text/html"
   cache_control = local.static_cache_policy
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "s3-object"
+  })
 }
 
 resource "aws_s3_object" "app_js" {
@@ -96,7 +99,9 @@ resource "aws_s3_object" "app_js" {
   content_type  = "application/javascript"
   cache_control = local.static_cache_policy
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "s3-object"
+  })
 }
 
 resource "aws_s3_object" "config_js" {
@@ -115,5 +120,7 @@ resource "aws_s3_object" "config_js" {
   content_type  = "application/javascript"
   cache_control = local.static_cache_policy
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "s3-object"
+  })
 }

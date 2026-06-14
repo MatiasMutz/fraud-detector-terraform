@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"math"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +32,7 @@ import (
 // signals). Values override NaN defaults for known feature-contract names; unknown
 // names are silently ignored.
 type Transaction struct {
+	TraceID            string             `json:"trace_id,omitempty"`
 	TransactionID      string             `json:"transaction_id"`
 	UserID             string             `json:"user_id"`
 	Amount             float64            `json:"amount"`
@@ -46,6 +50,7 @@ type Transaction struct {
 
 // ScoringResult is published to the results queues after scoring.
 type ScoringResult struct {
+	TraceID       string  `json:"trace_id,omitempty"`
 	TransactionID string  `json:"transaction_id"`
 	UserID        string  `json:"user_id"`
 	Amount        float64 `json:"amount"`
@@ -55,13 +60,16 @@ type ScoringResult struct {
 	FraudScore    float64 `json:"fraud_score"`
 	IsFraud       bool    `json:"is_fraud"`
 	ProcessedAt   string  `json:"processed_at,omitempty"`
+	IngestedAt    string  `json:"ingested_at,omitempty"`
 }
 
 // AuditEvent is written to S3 for full traceability.
 type AuditEvent struct {
 	Transaction   Transaction   `json:"transaction"`
 	ScoringResult ScoringResult `json:"scoring_result"`
+	TraceID       string        `json:"trace_id,omitempty"`
 	ProcessedAt   string        `json:"processed_at"`
+	IngestedAt    string        `json:"ingested_at,omitempty"`
 }
 
 type userLockSet struct {
@@ -101,9 +109,11 @@ func (s *mlScorer) score(_ context.Context, tx Transaction, profile *dynamo.User
 	result, err := s.inner.ScoreOne(fraudruntime.ScoreInput{
 		TransactionID: tx.TransactionID,
 		Features:      features,
+		Metadata: map[string]any{
+			"trace_id": tx.TraceID,
+		},
 	})
 	if err != nil {
-		log.Printf("ml engine error for tx=%s, falling back to rules: %v", tx.TransactionID, err)
 		return rulesScore(tx, profile)
 	}
 	return result.CalibratedScore, result.PredictedLabel == 1
@@ -137,9 +147,12 @@ func main() {
 		var err error
 		s3Client, err = store.NewS3Client(cfg)
 		if err != nil {
-			log.Printf("WARNING: failed to initialize S3 audit client: %v", err)
+			logProcessor("s3_audit_init_failed", map[string]any{
+				"level":       "WARN",
+				"error_class": errorClass(err),
+			})
 		} else {
-			log.Printf("S3 audit enabled — bucket=%s", os.Getenv("S3_AUDIT_BUCKET"))
+			logProcessor("s3_audit_enabled", nil)
 		}
 	}
 
@@ -151,8 +164,10 @@ func main() {
 	processorConcurrency := envInt("PROCESSOR_CONCURRENCY", 32, 1, 512)
 	processorPollers := envInt("PROCESSOR_POLLERS", 4, 1, 64)
 
-	log.Printf("worker started — queue=%s results_queue=%s fraud_alert_queue=%s concurrency=%d pollers=%d",
-		queueURL, resultsQueueURL, fraudAlertQueueURL, processorConcurrency, processorPollers)
+	logProcessor("worker_started", map[string]any{
+		"concurrency": processorConcurrency,
+		"pollers":     processorPollers,
+	})
 	runLoop(ctx, sqsClient, dynamoClient, s3Client, engine, queueURL, resultsQueueURL, fraudAlertQueueURL, processorConcurrency, processorPollers)
 }
 
@@ -161,17 +176,25 @@ func main() {
 func resolveScorer() scorer {
 	specPath, err := scoring.ResolveRuntimeSpecPath()
 	if err != nil {
-		log.Printf("WARNING: ML runtime spec not found (%v); using rule-based scoring", err)
+		logProcessor("scoring_rules_fallback", map[string]any{
+			"level":       "WARN",
+			"error_class": errorClass(err),
+		})
 		return &rulesScorer{}
 	}
 
 	s, err := fraudruntime.NewScorerFromSpecPath(specPath)
 	if err != nil {
-		log.Printf("WARNING: failed to load ML runtime spec at %s (%v); using rule-based scoring", specPath, err)
+		logProcessor("scoring_rules_fallback", map[string]any{
+			"level":       "WARN",
+			"error_class": errorClass(err),
+		})
 		return &rulesScorer{}
 	}
 
-	log.Printf("ML scoring engine loaded — spec=%s model_version=%s", specPath, s.Spec().ModelVersion)
+	logProcessor("scoring_engine_loaded", map[string]any{
+		"model_version": s.Spec().ModelVersion,
+	})
 	return &mlScorer{inner: s}
 }
 
@@ -188,11 +211,10 @@ func runLoop(
 	userLocks := &userLockSet{}
 
 	var workers sync.WaitGroup
-	for workerID := range processorConcurrency {
+	for range processorConcurrency {
 		workers.Go(func() {
 			for msg := range jobs {
 				if err := processMessage(ctx, msg, sqsClient, dynamoClient, s3Client, engine, userLocks, queueURL, resultsQueueURL, fraudAlertQueueURL); err != nil {
-					log.Printf("processing error worker=%d receipt=%s: %v", workerID, aws.ToString(msg.ReceiptHandle), err)
 					// Do not delete — visibility timeout expires and the message retries.
 					// After maxReceiveCount it lands in the DLQ.
 				}
@@ -207,9 +229,17 @@ func runLoop(
 					QueueUrl:            aws.String(queueURL),
 					MaxNumberOfMessages: 10,
 					WaitTimeSeconds:     20,
+					MessageSystemAttributeNames: []sqstypes.MessageSystemAttributeName{
+						sqstypes.MessageSystemAttributeNameApproximateReceiveCount,
+						sqstypes.MessageSystemAttributeNameSentTimestamp,
+					},
 				})
 				if err != nil {
-					log.Printf("sqs receive error poller=%d: %v", pollerID, err)
+					logProcessor("sqs_receive_error", map[string]any{
+						"level":       "WARN",
+						"poller_id":   pollerID,
+						"error_class": errorClass(err),
+					})
 					time.Sleep(5 * time.Second)
 					continue
 				}
@@ -234,37 +264,69 @@ func processMessage(
 	userLocks *userLockSet,
 	queueURL, resultsQueueURL, fraudAlertQueueURL string,
 ) error {
+	started := time.Now()
+	receiveCount := messageIntAttribute(msg, "ApproximateReceiveCount")
+	ingestedAt, sqsAgeMS := messageSentAt(msg, started)
+
 	var tx Transaction
 	if err := json.Unmarshal([]byte(aws.ToString(msg.Body)), &tx); err != nil {
 		// Malformed JSON can never succeed — delete immediately to avoid DLQ noise.
-		log.Printf("malformed message body, deleting: %v", err)
-		deleteMessage(ctx, sqsClient, queueURL, msg.ReceiptHandle)
+		traceID := ensureTraceID(Transaction{}, msg)
+		ackStatus, ackDurationMS := deleteMessage(ctx, sqsClient, queueURL, msg.ReceiptHandle)
+		logProcessor("tx_rejected", map[string]any{
+			"trace_id":        traceID,
+			"reason":          "invalid_json",
+			"receive_count":   receiveCount,
+			"sqs_age_ms":      sqsAgeMS,
+			"ack_status":      ackStatus,
+			"ack_duration_ms": ackDurationMS,
+			"duration_ms":     durationMS(started),
+		})
 		return nil
 	}
+	tx.TraceID = ensureTraceID(tx, msg)
+
 	if tx.TransactionID == "" || tx.UserID == "" {
-		log.Printf("message missing required fields transaction_id/user_id, deleting")
-		deleteMessage(ctx, sqsClient, queueURL, msg.ReceiptHandle)
+		ackStatus, ackDurationMS := deleteMessage(ctx, sqsClient, queueURL, msg.ReceiptHandle)
+		logProcessor("tx_rejected", map[string]any{
+			"trace_id":        tx.TraceID,
+			"reason":          "missing_required_fields",
+			"receive_count":   receiveCount,
+			"sqs_age_ms":      sqsAgeMS,
+			"ack_status":      ackStatus,
+			"ack_duration_ms": ackDurationMS,
+			"duration_ms":     durationMS(started),
+		})
 		return nil
 	}
 
 	unlockUser := userLocks.lock(tx.UserID)
 	defer unlockUser()
 
+	profileStarted := time.Now()
 	profile, err := dynamoClient.GetProfile(ctx, tx.UserID)
 	if err != nil {
-		return fmt.Errorf("dynamo GetProfile user=%s: %w", tx.UserID, err)
+		logProcessingFailed(tx.TraceID, started, "profile_load", err, receiveCount, sqsAgeMS)
+		return fmt.Errorf("dynamo GetProfile: %w", err)
 	}
+	profileLoadDurationMS := durationMS(profileStarted)
 
+	scoringStarted := time.Now()
 	fraudScore, isFraud := engine.score(ctx, tx, profile)
+	scoringDurationMS := durationMS(scoringStarted)
 
 	// Update the user profile with the new transaction regardless of the score.
+	profileUpdateStarted := time.Now()
 	if err := dynamoClient.UpdateProfile(
 		ctx, profile, tx.Amount, tx.Country, tx.Channel, tx.DestinationAccount, tx.Timestamp,
 	); err != nil {
-		return fmt.Errorf("dynamo UpdateProfile user=%s: %w", tx.UserID, err)
+		logProcessingFailed(tx.TraceID, started, "profile_update", err, receiveCount, sqsAgeMS)
+		return fmt.Errorf("dynamo UpdateProfile: %w", err)
 	}
+	profileUpdateDurationMS := durationMS(profileUpdateStarted)
 
 	result := ScoringResult{
+		TraceID:       tx.TraceID,
 		TransactionID: tx.TransactionID,
 		UserID:        tx.UserID,
 		Amount:        tx.Amount,
@@ -274,27 +336,51 @@ func processMessage(
 		FraudScore:    fraudScore,
 		IsFraud:       isFraud,
 		ProcessedAt:   time.Now().UTC().Format(time.RFC3339),
+		IngestedAt:    ingestedAt,
 	}
 
+	s3Status := "disabled"
+	s3DurationMS := int64(0)
 	if s3Client != nil {
 		audit := AuditEvent{
 			Transaction:   tx,
 			ScoringResult: result,
+			TraceID:       tx.TraceID,
 			ProcessedAt:   result.ProcessedAt,
+			IngestedAt:    result.IngestedAt,
 		}
+		s3Started := time.Now()
 		if err := s3Client.PutRawEvent(ctx, tx.TransactionID, audit); err != nil {
-			log.Printf("s3 audit error tx=%s: %v", tx.TransactionID, err)
+			s3Status = "failed"
+		} else {
+			s3Status = "ok"
 		}
+		s3DurationMS = durationMS(s3Started)
 	}
 
+	publishStarted := time.Now()
 	if err := publishScoringResult(ctx, sqsClient, resultsQueueURL, fraudAlertQueueURL, result); err != nil {
+		logProcessingFailed(tx.TraceID, started, "publish", err, receiveCount, sqsAgeMS)
 		return err
 	}
+	publishDurationMS := durationMS(publishStarted)
 
-	deleteMessage(ctx, sqsClient, queueURL, msg.ReceiptHandle)
-
-	log.Printf("processed tx=%s user=%s fraud_score=%.4f is_fraud=%v",
-		tx.TransactionID, tx.UserID, fraudScore, isFraud)
+	ackStatus, ackDurationMS := deleteMessage(ctx, sqsClient, queueURL, msg.ReceiptHandle)
+	logProcessor("tx_processed", map[string]any{
+		"trace_id":                   tx.TraceID,
+		"receive_count":              receiveCount,
+		"sqs_age_ms":                 sqsAgeMS,
+		"profile_load_duration_ms":   profileLoadDurationMS,
+		"profile_update_duration_ms": profileUpdateDurationMS,
+		"scoring_duration_ms":        scoringDurationMS,
+		"s3_status":                  s3Status,
+		"s3_duration_ms":             s3DurationMS,
+		"publish_status":             "ok",
+		"publish_duration_ms":        publishDurationMS,
+		"ack_status":                 ackStatus,
+		"ack_duration_ms":            ackDurationMS,
+		"duration_ms":                durationMS(started),
+	})
 
 	return nil
 }
@@ -307,14 +393,14 @@ func publishScoringResult(
 ) error {
 	payload, err := json.Marshal(result)
 	if err != nil {
-		return fmt.Errorf("marshal scoring result tx=%s: %w", result.TransactionID, err)
+		return fmt.Errorf("marshal scoring result: %w", err)
 	}
 
 	if _, err := sqsClient.SendMessage(ctx, &sqs.SendMessageInput{
 		QueueUrl:    aws.String(resultsQueueURL),
 		MessageBody: aws.String(string(payload)),
 	}); err != nil {
-		return fmt.Errorf("sqs send result tx=%s queue=%s: %w", result.TransactionID, resultsQueueURL, err)
+		return fmt.Errorf("sqs send result: %w", err)
 	}
 
 	if result.IsFraud {
@@ -322,7 +408,7 @@ func publishScoringResult(
 			QueueUrl:    aws.String(fraudAlertQueueURL),
 			MessageBody: aws.String(string(payload)),
 		}); err != nil {
-			return fmt.Errorf("sqs send fraud alert tx=%s queue=%s: %w", result.TransactionID, fraudAlertQueueURL, err)
+			return fmt.Errorf("sqs send auxiliary result: %w", err)
 		}
 	}
 
@@ -403,13 +489,15 @@ func buildMLFeatures(tx Transaction, featureOrder []string) map[string]float64 {
 	return features
 }
 
-func deleteMessage(ctx context.Context, sqsClient queueClient, queueURL string, receiptHandle *string) {
+func deleteMessage(ctx context.Context, sqsClient queueClient, queueURL string, receiptHandle *string) (string, int64) {
+	started := time.Now()
 	if _, err := sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
 		QueueUrl:      aws.String(queueURL),
 		ReceiptHandle: receiptHandle,
 	}); err != nil {
-		log.Printf("sqs delete error: %v", err)
+		return "failed", durationMS(started)
 	}
+	return "ok", durationMS(started)
 }
 
 func mustEnv(key string) string {
@@ -453,4 +541,157 @@ func clamp(x, min, max float64) float64 {
 		return max
 	}
 	return x
+}
+
+func ensureTraceID(tx Transaction, msg sqstypes.Message) string {
+	if isSafeTraceID(tx.TraceID) {
+		return strings.TrimSpace(tx.TraceID)
+	}
+	if tx.TransactionID != "" {
+		return "legacy-" + hashIdentifier(tx.TransactionID)
+	}
+	if aws.ToString(msg.MessageId) != "" {
+		return "sqs-" + hashIdentifier(aws.ToString(msg.MessageId))
+	}
+	return ""
+}
+
+func hashIdentifier(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])[:32]
+}
+
+func isSafeTraceID(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	if isUUIDTraceID(value) {
+		return true
+	}
+	if strings.HasPrefix(value, "legacy-") && len(value) == len("legacy-")+32 {
+		return isLowerHex(value[len("legacy-"):])
+	}
+	if strings.HasPrefix(value, "sqs-") && len(value) == len("sqs-")+32 {
+		return isLowerHex(value[len("sqs-"):])
+	}
+	return false
+}
+
+func isUUIDTraceID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for idx, char := range value {
+		switch idx {
+		case 8, 13, 18, 23:
+			if char != '-' {
+				return false
+			}
+		default:
+			if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isLowerHex(value string) bool {
+	for _, char := range value {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+func messageIntAttribute(msg sqstypes.Message, name string) int {
+	value, err := strconv.Atoi(msg.Attributes[name])
+	if err != nil {
+		return 0
+	}
+	return value
+}
+
+func messageSentAt(msg sqstypes.Message, now time.Time) (string, int64) {
+	raw := msg.Attributes["SentTimestamp"]
+	if raw == "" {
+		return "", 0
+	}
+	ms, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return "", 0
+	}
+	sentAt := time.UnixMilli(ms).UTC()
+	age := now.Sub(sentAt).Milliseconds()
+	if age < 0 {
+		age = 0
+	}
+	return sentAt.Format(time.RFC3339), age
+}
+
+func durationMS(started time.Time) int64 {
+	return time.Since(started).Milliseconds()
+}
+
+func logProcessingFailed(traceID string, started time.Time, stage string, err error, receiveCount int, sqsAgeMS int64) {
+	logProcessor("tx_processing_failed", map[string]any{
+		"level":         "WARN",
+		"trace_id":      traceID,
+		"failure_stage": stage,
+		"error_class":   errorClass(err),
+		"receive_count": receiveCount,
+		"sqs_age_ms":    sqsAgeMS,
+		"duration_ms":   durationMS(started),
+	})
+}
+
+func logProcessor(action string, fields map[string]any) {
+	record := processorLogRecord(action, fields)
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		log.Printf(`{"level":"ERROR","component":"processor","action":"log_encode_failed"}`)
+		return
+	}
+	log.Print(string(encoded))
+}
+
+func processorLogRecord(action string, fields map[string]any) map[string]any {
+	level := "INFO"
+	if fields != nil {
+		if customLevel, ok := fields["level"].(string); ok && customLevel != "" {
+			level = customLevel
+		}
+	}
+	record := map[string]any{
+		"level":     level,
+		"component": "processor",
+		"action":    action,
+	}
+	for key, value := range fields {
+		if key == "level" || value == nil || isSensitiveLogKey(key) {
+			continue
+		}
+		record[key] = value
+	}
+	return record
+}
+
+func isSensitiveLogKey(key string) bool {
+	switch key {
+	case "transaction_id", "user_id", "amount", "currency", "country", "channel",
+		"destination_account", "fraud_score", "decision", "payload", "body",
+		"receipt", "receipt_handle", "raw_receipt_handle":
+		return true
+	default:
+		return false
+	}
+}
+
+func errorClass(err error) string {
+	if err == nil {
+		return ""
+	}
+	return fmt.Sprintf("%T", err)
 }

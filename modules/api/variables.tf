@@ -88,6 +88,16 @@ variable "sns_topic_arn" {
   }
 }
 
+variable "user_behavior_table_name" {
+  description = "Nombre de la tabla DynamoDB de comportamiento de usuarios consultada por GET /users/{id}/behavior."
+  type        = string
+
+  validation {
+    condition     = length(var.user_behavior_table_name) > 0
+    error_message = "user_behavior_table_name no puede quedar vacío."
+  }
+}
+
 variable "jwt_issuer" {
   description = "Issuer del JWT de Cognito usado por el authorizer HTTP API."
   type        = string

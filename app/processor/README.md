@@ -13,6 +13,12 @@ SQS-driven fraud scoring worker deployed to **ECS Fargate** (`cmd/worker`). It i
 
 Producers receive only the SQS `SendMessage` acknowledgment. Scored outcomes are persisted by `results-writer` Lambda into RDS and exposed through the dashboard HTTP API.
 
+## Trace logging
+
+Every accepted message carries a `trace_id`. Producers should set it to a random UUID; legacy messages without it receive a deterministic hashed fallback inside the processor. CloudWatch logs are JSON and intentionally omit transaction IDs, user IDs, amounts, countries, channels, scores, decisions, payloads, and raw receipt handles.
+
+The processor emits one wide `tx_processed` INFO log per processed message with step durations, SQS age, receive count, S3 status, publish status, and ack status. Downstream components use the same `trace_id` for correlation.
+
 ## Build
 
 From the repository root:

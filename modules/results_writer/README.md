@@ -4,7 +4,7 @@ Composition module for the buffered path between the processor and the RDS resul
 
 The Lambda now uses the Lambda OS-only/custom runtime path: the deployment package passed through `package_file` must contain an executable named `bootstrap` at the zip root. Root workflows build that zip from `app/results_writer` before Terraform evaluates the Lambda `source_code_hash`.
 
-The writer batches the full SQS invocation into a single database transaction, creates the `transactions` table if needed, and performs bulk `INSERT ... VALUES ... ON CONFLICT (transaction_id) DO NOTHING` statements. Raw JSON payloads and SNS-style envelopes with a `Message` JSON body are both accepted.
+The writer batches the full SQS invocation into a single database transaction, creates or migrates the `transactions` table if needed, and performs bulk `INSERT ... VALUES ... ON CONFLICT (transaction_id) DO NOTHING` statements. Raw JSON payloads and SNS-style envelopes with a `Message` JSON body are both accepted. `trace_id` and `ingested_at` are persisted when present, and batch logs include counts, latency summaries, and trace samples without transaction business data.
 
 ## Resources
 

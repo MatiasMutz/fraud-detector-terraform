@@ -52,10 +52,14 @@ func (r *Runtime) Serve(ctx context.Context) error {
 			invokeCtx, cancel = context.WithDeadline(ctx, deadline)
 		}
 
-		result, err := Handle(invokeCtx, r.db, event)
+		result, err := HandleWithRequest(invokeCtx, r.db, event, requestID, r.logger)
 		cancel()
 		if err != nil {
-			r.logger.Printf("results writer batch failed request_id=%s: %v", requestID, err)
+			logWriter(r.logger, "results_batch_failed", map[string]any{
+				"level":          "WARN",
+				"aws_request_id": requestID,
+				"error_class":    errorClass(err),
+			})
 			if postErr := r.postInvocationError(requestID, err); postErr != nil {
 				return postErr
 			}

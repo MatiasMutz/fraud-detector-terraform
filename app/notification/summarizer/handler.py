@@ -12,6 +12,52 @@ logger.setLevel(logging.INFO)
 
 sqs = boto3.client("sqs")
 sns = boto3.client("sns")
+MAX_TRACE_SAMPLES = 20
+
+
+def _safe_log(action, **fields):
+    record = {
+        "level": fields.pop("level", "INFO"),
+        "component": "fraud_summarizer",
+        "action": action,
+    }
+    for key, value in fields.items():
+        if value is None or _is_sensitive_log_key(key):
+            continue
+        record[key] = value
+    logger.info(json.dumps(record, default=str))
+
+
+def _is_sensitive_log_key(key):
+    return key in {
+        "transaction_id",
+        "user_id",
+        "amount",
+        "currency",
+        "country",
+        "channel",
+        "destination_account",
+        "fraud_score",
+        "decision",
+        "payload",
+        "body",
+        "receipt",
+        "receipt_handle",
+        "email",
+    }
+
+
+def _trace_summary(events):
+    seen = set()
+    samples = []
+    for event in events:
+        trace_id = str(event.get("trace_id") or "").strip()
+        if not trace_id or trace_id in seen:
+            continue
+        seen.add(trace_id)
+        if len(samples) < MAX_TRACE_SAMPLES:
+            samples.append(trace_id)
+    return len(seen), samples
 
 
 def _parse_decimal(value):
@@ -199,23 +245,32 @@ def handler(event, context):
 
     messages = _receive_messages(queue_url, max_messages)
     if not messages:
-        logger.info(json.dumps({"action": "fraud_summary_empty"}))
+        _safe_log("fraud_summary_empty", message_count=0, event_count=0)
         return {"published": False, "messages": 0}
 
     events = []
+    parse_errors = 0
     for message in messages:
         try:
             events.append(_parse_payload(message["Body"]))
-        except Exception as exc:
-            logger.error(json.dumps({"action": "fraud_summary_parse_error", "error": str(exc)}))
+        except Exception:
+            parse_errors += 1
 
     text_body, event_count = _build_summary(
         events,
         dashboard_url=dashboard_url,
     )
+    trace_count, trace_samples = _trace_summary(events)
     if event_count == 0:
-        logger.info(json.dumps({"action": "fraud_summary_no_valid_events", "messages": len(messages)}))
         _delete_messages(queue_url, messages)
+        _safe_log(
+            "fraud_summary_no_valid_events",
+            message_count=len(messages),
+            event_count=0,
+            parse_error_count=parse_errors,
+            trace_id_count=trace_count,
+            trace_id_samples=trace_samples,
+        )
         return {"published": False, "messages": len(messages), "events": 0}
 
     _publish_summary(
@@ -225,13 +280,12 @@ def handler(event, context):
     )
     _delete_messages(queue_url, messages)
 
-    logger.info(
-        json.dumps(
-            {
-                "action": "fraud_summary_published",
-                "messages": len(messages),
-                "events": event_count,
-            }
-        )
+    _safe_log(
+        "fraud_summary_published",
+        message_count=len(messages),
+        event_count=event_count,
+        parse_error_count=parse_errors,
+        trace_id_count=trace_count,
+        trace_id_samples=trace_samples,
     )
     return {"published": True, "messages": len(messages), "events": event_count}

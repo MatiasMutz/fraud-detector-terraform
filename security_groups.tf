@@ -8,7 +8,9 @@ resource "aws_vpc_security_group_egress_rule" "proxy_to_rds" {
   from_port                    = 5432
   to_port                      = 5432
 
-  tags = local.common_tags
+  tags = merge(local.service_tags.data_store, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_vpc_security_group_ingress_rule" "rds_from_proxy" {
@@ -19,7 +21,9 @@ resource "aws_vpc_security_group_ingress_rule" "rds_from_proxy" {
   from_port                    = 5432
   to_port                      = 5432
 
-  tags = local.common_tags
+  tags = merge(local.service_tags.data_store, {
+    Component = "security-group-rule"
+  })
 }
 
 # Lambda results-writer ↔ Proxy
@@ -32,7 +36,9 @@ resource "aws_vpc_security_group_egress_rule" "writer_lambda_to_proxy" {
   from_port                    = 5432
   to_port                      = 5432
 
-  tags = local.common_tags
+  tags = merge(local.service_tags.results_writer, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_vpc_security_group_ingress_rule" "proxy_from_writer_lambda" {
@@ -43,7 +49,9 @@ resource "aws_vpc_security_group_ingress_rule" "proxy_from_writer_lambda" {
   from_port                    = 5432
   to_port                      = 5432
 
-  tags = local.common_tags
+  tags = merge(local.service_tags.results_writer, {
+    Component = "security-group-rule"
+  })
 }
 
 # Lambda api ↔ Proxy
@@ -56,7 +64,9 @@ resource "aws_vpc_security_group_egress_rule" "api_lambda_to_proxy" {
   from_port                    = 5432
   to_port                      = 5432
 
-  tags = local.common_tags
+  tags = merge(local.service_tags.api, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_vpc_security_group_ingress_rule" "proxy_from_api_lambda" {
@@ -67,5 +77,7 @@ resource "aws_vpc_security_group_ingress_rule" "proxy_from_api_lambda" {
   from_port                    = 5432
   to_port                      = 5432
 
-  tags = local.common_tags
+  tags = merge(local.service_tags.api, {
+    Component = "security-group-rule"
+  })
 }

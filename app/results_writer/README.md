@@ -4,6 +4,8 @@ Go Lambda application that drains the results SQS queue and writes scoring resul
 
 The Terraform infrastructure lives in `modules/results_writer`. This directory owns only runtime code and tests.
 
+The writer persists `trace_id` and `ingested_at` when present, and emits one privacy-safe JSON batch log per invocation. Batch logs include counts, latency summaries, and trace ID samples only; they do not include transaction IDs, user IDs, amounts, scores, decisions, payloads, or receipt handles.
+
 Build from the repository root:
 
 ```bash

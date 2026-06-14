@@ -1,6 +1,6 @@
 locals {
   module_tags = merge(var.tags, {
-    Component = "notification-topic"
+    Service = "notification-topic"
   })
 
   topic_name = format("%s-fraud-summaries", var.project)
@@ -29,7 +29,8 @@ resource "aws_sns_topic" "summary" {
   name = local.topic_name
 
   tags = merge(local.module_tags, {
-    Name = local.topic_name
+    Component = "sns-topic"
+    Name      = local.topic_name
   })
 }
 

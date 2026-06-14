@@ -224,6 +224,7 @@ def make_transactions(profiles, days_back):
             ts    = random_ts(days_back)
 
             txs.append({
+                "trace_id":       str(uuid.uuid4()),
                 "transaction_id": str(uuid.uuid4()),
                 "user_id":        profile["id"],
                 "amount":         amount,

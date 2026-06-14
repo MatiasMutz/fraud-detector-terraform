@@ -1,6 +1,6 @@
 locals {
   module_tags = merge(var.tags, {
-    Component = "results-writer"
+    Service = "results-writer"
   })
 
   queue_name     = format("%s-results-events", var.project)
@@ -16,8 +16,9 @@ resource "aws_sqs_queue" "results_dlq" {
   sqs_managed_sse_enabled   = true
 
   tags = merge(local.module_tags, {
-    Name = local.dlq_name
-    Role = "dlq"
+    Component = "sqs-queue"
+    Name      = local.dlq_name
+    Role      = "dlq"
   })
 }
 
@@ -44,8 +45,9 @@ resource "aws_sqs_queue" "results" {
   })
 
   tags = merge(local.module_tags, {
-    Name = local.queue_name
-    Role = "primary"
+    Component = "sqs-queue"
+    Name      = local.queue_name
+    Role      = "primary"
   })
 }
 
@@ -103,7 +105,8 @@ resource "aws_cloudwatch_log_group" "writer" {
   retention_in_days = var.log_retention_days
 
   tags = merge(local.module_tags, {
-    Name = local.log_group_name
+    Component = "cloudwatch-log-group"
+    Name      = local.log_group_name
   })
 }
 
@@ -113,7 +116,8 @@ resource "aws_security_group" "writer_lambda" {
   vpc_id      = var.vpc_id
 
   tags = merge(local.module_tags, {
-    Name = format("%s-writer-lambda-sg", var.project)
+    Component = "security-group"
+    Name      = format("%s-writer-lambda-sg", var.project)
   })
 }
 
@@ -125,7 +129,9 @@ resource "aws_vpc_security_group_egress_rule" "writer_to_endpoints" {
   from_port                    = 443
   to_port                      = 443
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_lambda_function" "writer" {
@@ -164,7 +170,8 @@ resource "aws_lambda_function" "writer" {
   depends_on = [aws_cloudwatch_log_group.writer]
 
   tags = merge(local.module_tags, {
-    Name = local.function_name
+    Component = "lambda"
+    Name      = local.function_name
   })
 }
 

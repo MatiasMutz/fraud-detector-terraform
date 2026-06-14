@@ -10,6 +10,7 @@ import os
 import random
 import sys
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import boto3
@@ -253,6 +254,7 @@ def make_transaction(index: int, fraud_pct: int) -> tuple[str, str, bool]:
     timestamp = datetime.now(timezone.utc) - timedelta(seconds=random.randint(0, 7 * 24 * 3600))
 
     message = {
+        "trace_id": str(uuid.uuid4()),
         "transaction_id": f"{time.time_ns()}-{index}",
         "user_id": user_id,
         "amount": amount,

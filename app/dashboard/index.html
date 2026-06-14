@@ -211,6 +211,8 @@
     tr.clickable { cursor: pointer; }
     tr.clickable:hover td { background: var(--accent-light); }
     .mono { font-family: ui-monospace, monospace; font-size: .72rem; color: var(--text-soft); }
+    .trace-copy { cursor: pointer; max-width: 12rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: none; background: transparent; padding: 0; text-align: left; }
+    .trace-copy:hover { color: var(--accent); }
     .empty-row, .loading-row { text-align: center; color: var(--text-soft); padding: 2.5rem !important; font-style: italic; }
 
     /* ── Pills ──────────────────────────────────────────── */
@@ -278,6 +280,10 @@
     .summary-item { padding: .8rem .9rem; border-radius: var(--radius-sm); background: #fafbfc; border: 1px solid var(--border); }
     .summary-label { display: block; font-size: .68rem; text-transform: uppercase; letter-spacing: .05em; color: var(--text-soft); margin-bottom: .25rem; }
     .summary-value { font-weight: 600; }
+    .behavior-panel { margin-bottom: 1.25rem; }
+    .behavior-tags { display: flex; flex-wrap: wrap; gap: .35rem; margin: -.15rem 0 1rem; }
+    .behavior-tag { display: inline-flex; align-items: center; max-width: 100%; padding: .18rem .5rem; border-radius: 999px; background: var(--accent-light); color: var(--accent); font-size: .72rem; font-weight: 600; }
+    .behavior-empty { margin: 0 0 1rem; color: var(--text-soft); font-size: .82rem; }
     .form-grid { display: grid; gap: .85rem; }
     .form-row { display: grid; gap: .85rem; grid-template-columns: 1fr 1fr; }
     @media (max-width: 640px) { .form-row { grid-template-columns: 1fr; } }
@@ -453,9 +459,9 @@
         <div class="table-wrap">
           <table id="recent-fraud-table">
             <thead>
-              <tr><th>ID</th><th>Usuario</th><th>Monto</th><th>País</th><th>Canal</th><th>Score</th><th>Decisión</th><th>Procesada</th></tr>
+              <tr><th>ID</th><th>Trace</th><th>Usuario</th><th>Monto</th><th>País</th><th>Canal</th><th>Score</th><th>Decisión</th><th>Procesada</th></tr>
             </thead>
-            <tbody><tr><td colspan="8" class="loading-row">Cargando…</td></tr></tbody>
+            <tbody><tr><td colspan="9" class="loading-row">Cargando…</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -484,6 +490,7 @@
             <thead>
               <tr>
                 <th>ID</th>
+                <th>Trace</th>
                 <th>Usuario</th>
                 <th class="sortable" data-sort="amount">Monto<span class="sort-icon"> ⇅</span></th>
                 <th>País</th>
@@ -493,7 +500,7 @@
                 <th class="sortable" data-sort="processed_at">Procesada<span class="sort-icon"> ↓</span></th>
               </tr>
             </thead>
-            <tbody id="tx-tbody"><tr><td colspan="8" class="loading-row">Cargando…</td></tr></tbody>
+            <tbody id="tx-tbody"><tr><td colspan="9" class="loading-row">Cargando…</td></tr></tbody>
           </table>
         </div>
         <div class="pagination">

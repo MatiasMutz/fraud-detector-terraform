@@ -1,6 +1,6 @@
 locals {
   module_tags = merge(var.tags, {
-    Component = "onprem-sim"
+    Service = "onprem-sim"
   })
 
   name_prefix = format("%s-onprem", var.project)
@@ -23,7 +23,8 @@ resource "aws_vpc" "onprem" {
   enable_dns_hostnames = true
 
   tags = merge(local.module_tags, {
-    Name = format("%s-vpc", local.name_prefix)
+    Component = "vpc"
+    Name      = format("%s-vpc", local.name_prefix)
   })
 }
 
@@ -31,7 +32,8 @@ resource "aws_internet_gateway" "igw" {
   vpc_id = aws_vpc.onprem.id
 
   tags = merge(local.module_tags, {
-    Name = format("%s-igw", local.name_prefix)
+    Component = "internet-gateway"
+    Name      = format("%s-igw", local.name_prefix)
   })
 }
 
@@ -42,8 +44,9 @@ resource "aws_subnet" "public" {
   map_public_ip_on_launch = true
 
   tags = merge(local.module_tags, {
-    Name = format("%s-public", local.name_prefix)
-    Tier = "public"
+    Component = "subnet"
+    Name      = format("%s-public", local.name_prefix)
+    Tier      = "public"
   })
 }
 
@@ -51,7 +54,8 @@ resource "aws_route_table" "public" {
   vpc_id = aws_vpc.onprem.id
 
   tags = merge(local.module_tags, {
-    Name = format("%s-public-rt", local.name_prefix)
+    Component = "route-table"
+    Name      = format("%s-public-rt", local.name_prefix)
   })
 }
 
@@ -78,7 +82,8 @@ resource "aws_security_group" "router" {
   vpc_id      = aws_vpc.onprem.id
 
   tags = merge(local.module_tags, {
-    Name = format("%s-router-sg", local.name_prefix)
+    Component = "security-group"
+    Name      = format("%s-router-sg", local.name_prefix)
   })
 }
 
@@ -90,7 +95,9 @@ resource "aws_vpc_security_group_ingress_rule" "router_ike" {
   from_port         = 500
   to_port           = 500
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_vpc_security_group_ingress_rule" "router_natt" {
@@ -101,7 +108,9 @@ resource "aws_vpc_security_group_ingress_rule" "router_natt" {
   from_port         = 4500
   to_port           = 4500
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_vpc_security_group_ingress_rule" "router_esp" {
@@ -110,7 +119,9 @@ resource "aws_vpc_security_group_ingress_rule" "router_esp" {
   cidr_ipv4         = "0.0.0.0/0"
   ip_protocol       = "50"
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_vpc_security_group_ingress_rule" "router_ah" {
@@ -119,7 +130,9 @@ resource "aws_vpc_security_group_ingress_rule" "router_ah" {
   cidr_ipv4         = "0.0.0.0/0"
   ip_protocol       = "51"
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_vpc_security_group_ingress_rule" "router_from_aws" {
@@ -128,7 +141,9 @@ resource "aws_vpc_security_group_ingress_rule" "router_from_aws" {
   cidr_ipv4         = var.aws_vpc_cidr
   ip_protocol       = "-1"
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_vpc_security_group_egress_rule" "router_all" {
@@ -137,7 +152,9 @@ resource "aws_vpc_security_group_egress_rule" "router_all" {
   cidr_ipv4         = "0.0.0.0/0"
   ip_protocol       = "-1"
 
-  tags = local.module_tags
+  tags = merge(local.module_tags, {
+    Component = "security-group-rule"
+  })
 }
 
 resource "aws_eip" "gw" {
@@ -145,7 +162,8 @@ resource "aws_eip" "gw" {
   domain = "vpc"
 
   tags = merge(local.module_tags, {
-    Name = format("%s-router-eip", local.name_prefix)
+    Component = "elastic-ip"
+    Name      = format("%s-router-eip", local.name_prefix)
   })
 
   depends_on = [aws_internet_gateway.igw]
@@ -161,7 +179,8 @@ resource "aws_customer_gateway" "cgw" {
   type       = "ipsec.1"
 
   tags = merge(local.module_tags, {
-    Name = format("%s-cgw", local.name_prefix)
+    Component = "customer-gateway"
+    Name      = format("%s-cgw", local.name_prefix)
   })
 }
 
@@ -172,7 +191,8 @@ resource "aws_vpn_connection" "vpn" {
   static_routes_only  = false
 
   tags = merge(local.module_tags, {
-    Name = format("%s-vpn", local.name_prefix)
+    Component = "vpn-connection"
+    Name      = format("%s-vpn", local.name_prefix)
   })
 }
 
@@ -189,8 +209,10 @@ resource "aws_secretsmanager_secret" "tunnel1" {
   recovery_window_in_days = 0
 
   tags = merge(local.module_tags, {
-    Name   = local.tunnel_psk_secret_names.tunnel1
-    Tunnel = "1"
+    Component = "secrets-manager-secret"
+    Name      = local.tunnel_psk_secret_names.tunnel1
+    Role      = "vpn-psk"
+    Tunnel    = "1"
   })
 }
 
@@ -207,8 +229,10 @@ resource "aws_secretsmanager_secret" "tunnel2" {
   recovery_window_in_days = 0
 
   tags = merge(local.module_tags, {
-    Name   = local.tunnel_psk_secret_names.tunnel2
-    Tunnel = "2"
+    Component = "secrets-manager-secret"
+    Name      = local.tunnel_psk_secret_names.tunnel2
+    Role      = "vpn-psk"
+    Tunnel    = "2"
   })
 }
 
@@ -258,7 +282,8 @@ resource "aws_cloudformation_stack" "strongswan" {
   }
 
   tags = merge(local.module_tags, {
-    Name = format("%s-strongswan", local.name_prefix)
+    Component = "cloudformation-stack"
+    Name      = format("%s-strongswan", local.name_prefix)
   })
 
   lifecycle {
@@ -307,7 +332,8 @@ resource "aws_route53_zone" "sqs_private" {
   comment = "Resuelve sqs.<region>.amazonaws.com a las IPs privadas del SQS VPCE para clientes en la VPC on-premise."
 
   tags = merge(local.module_tags, {
-    Name = format("%s-sqs-phz", local.name_prefix)
+    Component = "route53-private-hosted-zone"
+    Name      = format("%s-sqs-phz", local.name_prefix)
   })
 }
 
