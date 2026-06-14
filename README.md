@@ -190,7 +190,7 @@ Cola SQS de ingesta de transacciones con Dead Letter Queue. El acceso está rest
 Toda la capa de persistencia del sistema en un único módulo:
 
 - **DynamoDB** `itba-tp-fraud-user-behavior`: `[aws_dynamodb_table.user_behavior](modules/data_store/main.tf#L13)` — perfiles de comportamiento de usuarios. Clave de partición `user_id`. Consultado por Fargate durante el scoring.
-- **RDS PostgreSQL 17.4** `itba-tp-fraud-results-db`: `[aws_db_instance.results](modules/data_store/main.tf#L118)` — resultados de scoring. Acceso exclusivo desde la VPC vía RDS Proxy.
+- **RDS PostgreSQL 17.10** `itba-tp-fraud-results-db`: `[aws_db_instance.results](modules/data_store/main.tf#L118)` — resultados de scoring. Acceso exclusivo desde la VPC vía RDS Proxy.
 - **Secrets Manager**: credenciales RDS para el proxy.
 - **RDS Proxy**: pool entre Lambdas y RDS en `db.t3.micro`.
 - Las reglas cruzadas de security group con Lambdas/RDS están en la raíz — [`security_groups.tf`](security_groups.tf) — para evitar dependencias circulares entre módulos.

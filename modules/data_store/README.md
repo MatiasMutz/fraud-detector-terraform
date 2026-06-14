@@ -18,7 +18,7 @@ Provisions all persistent storage for the fraud-scoring system: a DynamoDB table
 - `aws_db_subnet_group.results` — `<project>-results-db-subnet-group`. Spans the data-tier subnets passed in `private_subnet_ids` (≥2 AZs required by RDS, even for single-AZ deployments).
 - `aws_security_group.rds` — `<project>-rds-sg`. No ingress rules are created inside this module; they are added in the root composition to avoid circular module dependencies.
 - `aws_db_instance.results` — `<project>-results-db`.
-  - Engine: PostgreSQL 17.4, `db.t3.micro`, 20 GiB gp2.
+  - Engine: PostgreSQL 17.10, `db.t3.micro`, 20 GiB gp2.
   - `storage_encrypted = true` (AWS-owned key; KMS-CMK not available in Academy).
   - Single-AZ, no automated backups, `skip_final_snapshot = true` — lab cost optimisations.
   - `lifecycle { ignore_changes = [password] }` so Terraform does not attempt to re-set the password on subsequent plans.
