@@ -122,10 +122,35 @@ def _ensure_schema(conn):
             );
 
             ALTER TABLE dashboard_access
+                ADD COLUMN IF NOT EXISTS email TEXT,
+                ADD COLUMN IF NOT EXISTS email_normalized TEXT,
+                ADD COLUMN IF NOT EXISTS display_name TEXT,
+                ADD COLUMN IF NOT EXISTS role TEXT,
+                ADD COLUMN IF NOT EXISTS status TEXT,
+                ADD COLUMN IF NOT EXISTS cognito_sub TEXT,
+                ADD COLUMN IF NOT EXISTS invited_by_email TEXT,
+                ADD COLUMN IF NOT EXISTS is_bootstrap_admin BOOLEAN,
+                ADD COLUMN IF NOT EXISTS invited_at TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS activated_at TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ,
                 ADD COLUMN IF NOT EXISTS summary_sns_subscription_arn TEXT,
                 ADD COLUMN IF NOT EXISTS summary_sns_subscription_status TEXT,
                 ADD COLUMN IF NOT EXISTS summary_sns_subscription_warning TEXT,
-                ADD COLUMN IF NOT EXISTS summary_sns_subscription_updated_at TIMESTAMPTZ;
+                ADD COLUMN IF NOT EXISTS summary_sns_subscription_updated_at TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+
+            UPDATE dashboard_access
+            SET email_normalized = COALESCE(email_normalized, LOWER(TRIM(email))),
+                role = COALESCE(role, 'viewer'),
+                status = COALESCE(status, 'active'),
+                is_bootstrap_admin = COALESCE(is_bootstrap_admin, FALSE),
+                created_at = COALESCE(created_at, NOW()),
+                updated_at = COALESCE(updated_at, NOW());
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_dashboard_access_email_normalized_unique
+                ON dashboard_access (email_normalized);
 
             CREATE INDEX IF NOT EXISTS idx_dashboard_access_role
                 ON dashboard_access (role);
@@ -1457,6 +1482,7 @@ def handler(event, context):
             response = _dispatch_request(event, path, query, path_params, method)
     except Exception as exc:
         error_class = _error_class(exc)
+        logger.exception("api_unhandled_exception")
         response = _err(500, "INTERNAL_ERROR", "Internal server error")
 
     response = _with_trace(response, trace_id)

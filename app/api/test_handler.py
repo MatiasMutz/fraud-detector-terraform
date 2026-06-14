@@ -111,6 +111,41 @@ class ApiTraceLoggingTests(unittest.TestCase):
         self.assertNotIn("amount", payload)
         self.assertNotIn("query", payload)
 
+    def test_schema_migration_backfills_dashboard_access_columns(self):
+        class FakeCursor:
+            def __init__(self):
+                self.statements = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def execute(self, statement, params=None):
+                self.statements.append(statement)
+
+        class FakeConnection:
+            def __init__(self):
+                self.cursor_instance = FakeCursor()
+                self.committed = False
+
+            def cursor(self, *args, **kwargs):
+                return self.cursor_instance
+
+            def commit(self):
+                self.committed = True
+
+        conn = FakeConnection()
+        self.handler._ensure_schema(conn)
+        statement = conn.cursor_instance.statements[0]
+
+        self.assertIn("ADD COLUMN IF NOT EXISTS is_bootstrap_admin BOOLEAN", statement)
+        self.assertIn("ADD COLUMN IF NOT EXISTS role TEXT", statement)
+        self.assertIn("ADD COLUMN IF NOT EXISTS status TEXT", statement)
+        self.assertIn("idx_dashboard_access_email_normalized_unique", statement)
+        self.assertTrue(conn.committed)
+
 
 if __name__ == "__main__":
     unittest.main()

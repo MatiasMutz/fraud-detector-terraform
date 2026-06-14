@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -130,33 +131,39 @@ def ensure_cognito_user(user_pool_id, email, password, display_name, region):
     return attr_value(user, "sub")
 
 
-def invoke_bootstrap_lambda(function_name, payload, region):
+def invoke_bootstrap_lambda(function_name, payload, region, *, max_attempts=6, retry_delay_seconds=10):
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tmp:
         json.dump(payload, tmp)
         tmp_path = Path(tmp.name)
 
     out_path = tmp_path.with_suffix(".out.json")
     try:
-        run(
-            [
-                "aws",
-                "lambda",
-                "invoke",
-                "--function-name",
-                function_name,
-                "--payload",
-                f"file://{tmp_path}",
-                "--cli-binary-format",
-                "raw-in-base64-out",
-                "--region",
-                region,
-                str(out_path),
-            ]
-        )
-        body = json.loads(out_path.read_text())
-        if isinstance(body, dict) and body.get("statusCode", 200) >= 400:
-            raise RuntimeError(f"bootstrap lambda returned error: {body}")
-        return body
+        for attempt in range(1, max_attempts + 1):
+            run(
+                [
+                    "aws",
+                    "lambda",
+                    "invoke",
+                    "--function-name",
+                    function_name,
+                    "--payload",
+                    f"file://{tmp_path}",
+                    "--cli-binary-format",
+                    "raw-in-base64-out",
+                    "--region",
+                    region,
+                    str(out_path),
+                ]
+            )
+            body = json.loads(out_path.read_text())
+            status_code = body.get("statusCode", 200) if isinstance(body, dict) else 200
+            if not isinstance(status_code, int) or status_code < 400:
+                return body
+            if status_code < 500 or attempt == max_attempts:
+                raise RuntimeError(f"bootstrap lambda returned error: {body}")
+            time.sleep(retry_delay_seconds)
+
+        raise RuntimeError("bootstrap lambda did not return a response")
     finally:
         tmp_path.unlink(missing_ok=True)
         out_path.unlink(missing_ok=True)
@@ -171,6 +178,8 @@ def main():
     parser.add_argument("--region", default="us-east-1")
     parser.add_argument("--user-pool-id", default="")
     parser.add_argument("--lambda-function", default="")
+    parser.add_argument("--max-attempts", type=int, default=6)
+    parser.add_argument("--retry-delay-seconds", type=float, default=10)
     args = parser.parse_args()
 
     email = normalize_email(args.email)
@@ -204,7 +213,13 @@ def main():
         "cognito_sub": cognito_sub,
         "alert_email": alert_email,
     }
-    body = invoke_bootstrap_lambda(function_name, payload, args.region)
+    body = invoke_bootstrap_lambda(
+        function_name,
+        payload,
+        args.region,
+        max_attempts=max(1, args.max_attempts),
+        retry_delay_seconds=max(0, args.retry_delay_seconds),
+    )
     print(json.dumps(body, indent=2, sort_keys=True))
 
 
