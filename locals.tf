@@ -24,5 +24,7 @@ locals {
   # evitar count/for_each que dependan de random_shuffle.
   azs = slice(data.aws_availability_zones.available.names, 0, 2)
 
-  dashboard_app_url = format("https://%s-dashboard-%s.s3.%s.amazonaws.com/index.html", local.project, data.aws_caller_identity.current.account_id, data.aws_region.current.name)
+  dashboard_app_url       = format("https://%s-dashboard-%s.s3.%s.amazonaws.com/index.html", local.project, data.aws_caller_identity.current.account_id, data.aws_region.current.name)
+  dashboard_callback_urls = [local.dashboard_app_url]
+  dashboard_logout_urls   = [local.dashboard_app_url]
 }
