@@ -10,19 +10,25 @@ from pathlib import Path
 def load_handler():
     fake_psycopg2 = types.ModuleType("psycopg2")
     fake_psycopg2_extras = types.ModuleType("psycopg2.extras")
+    fake_psycopg2.OperationalError = type("OperationalError", (Exception,), {})
+    fake_psycopg2.DatabaseError = type("DatabaseError", (Exception,), {})
     fake_psycopg2_extras.RealDictCursor = object
     fake_psycopg2.extras = fake_psycopg2_extras
     fake_boto3 = types.ModuleType("boto3")
     fake_boto3.client = lambda *args, **kwargs: object()
     fake_botocore = types.ModuleType("botocore")
+    fake_botocore_config = types.ModuleType("botocore.config")
     fake_botocore_exceptions = types.ModuleType("botocore.exceptions")
-    fake_botocore_exceptions.ClientError = Exception
+    fake_botocore_config.Config = lambda *args, **kwargs: {"args": args, "kwargs": kwargs}
+    fake_botocore_exceptions.BotoCoreError = type("BotoCoreError", (Exception,), {})
+    fake_botocore_exceptions.ClientError = type("ClientError", (Exception,), {})
 
-    sys.modules.setdefault("psycopg2", fake_psycopg2)
-    sys.modules.setdefault("psycopg2.extras", fake_psycopg2_extras)
-    sys.modules.setdefault("boto3", fake_boto3)
-    sys.modules.setdefault("botocore", fake_botocore)
-    sys.modules.setdefault("botocore.exceptions", fake_botocore_exceptions)
+    sys.modules["psycopg2"] = fake_psycopg2
+    sys.modules["psycopg2.extras"] = fake_psycopg2_extras
+    sys.modules["boto3"] = fake_boto3
+    sys.modules["botocore"] = fake_botocore
+    sys.modules["botocore.config"] = fake_botocore_config
+    sys.modules["botocore.exceptions"] = fake_botocore_exceptions
 
     path = Path(__file__).with_name("handler.py")
     spec = importlib.util.spec_from_file_location("api_handler_under_test", path)
@@ -111,10 +117,38 @@ class ApiTraceLoggingTests(unittest.TestCase):
         self.assertNotIn("amount", payload)
         self.assertNotIn("query", payload)
 
-    def test_schema_migration_backfills_dashboard_access_columns(self):
+    def test_handler_logs_request_start_before_dispatch(self):
+        def fake_dispatch(event, path, query, path_params, method):
+            return self.handler._ok({"status": "ok"})
+
+        event = {
+            "rawPath": "/dashboard/me",
+            "headers": {"X-Trace-Id": "11111111-1111-4111-8111-111111111111"},
+            "requestContext": {
+                "requestId": "req-1",
+                "http": {"method": "GET"},
+            },
+        }
+
+        original_dispatch = self.handler._dispatch_request
+        self.handler._dispatch_request = fake_dispatch
+        try:
+            logger = logging.getLogger()
+            with self.assertLogs(logger, level="INFO") as captured:
+                response = self.handler.handler(event, None)
+        finally:
+            self.handler._dispatch_request = original_dispatch
+
+        self.assertEqual(response["statusCode"], 200)
+        start_payload = json.loads(captured.output[0].split("INFO:root:", 1)[-1])
+        self.assertEqual(start_payload["action"], "api_request_started")
+        self.assertEqual(start_payload["route"], "/dashboard/me")
+        self.assertEqual(start_payload["method"], "GET")
+
+    def test_direct_migration_action_applies_schema(self):
         class FakeCursor:
             def __init__(self):
-                self.statements = []
+                self.executions = []
 
             def __enter__(self):
                 return self
@@ -123,29 +157,95 @@ class ApiTraceLoggingTests(unittest.TestCase):
                 return False
 
             def execute(self, statement, params=None):
-                self.statements.append(statement)
+                self.executions.append((statement, params))
 
         class FakeConnection:
-            def __init__(self):
+            def __init__(self, kwargs):
+                self.kwargs = kwargs
                 self.cursor_instance = FakeCursor()
                 self.committed = False
+                self.rolled_back = False
+                self.closed = False
 
-            def cursor(self, *args, **kwargs):
+            def cursor(self):
                 return self.cursor_instance
 
             def commit(self):
                 self.committed = True
 
-        conn = FakeConnection()
-        self.handler._ensure_schema(conn)
-        statement = conn.cursor_instance.statements[0]
+            def rollback(self):
+                self.rolled_back = True
 
-        self.assertIn("ADD COLUMN IF NOT EXISTS is_bootstrap_admin BOOLEAN", statement)
-        self.assertIn("ADD COLUMN IF NOT EXISTS role TEXT", statement)
-        self.assertIn("ADD COLUMN IF NOT EXISTS status TEXT", statement)
-        self.assertIn("idx_dashboard_access_email_normalized_unique", statement)
-        self.assertTrue(conn.committed)
+            def close(self):
+                self.closed = True
 
+        connection = None
+
+        def fake_connect(**kwargs):
+            nonlocal connection
+            connection = FakeConnection(kwargs)
+            return connection
+
+        original_connect = getattr(self.handler.psycopg2, "connect", None)
+        self.handler.psycopg2.connect = fake_connect
+        self.handler.os.environ.update(
+            {
+                "DB_HOST": "db.example",
+                "DB_PORT": "5432",
+                "DB_NAME": "fraud_results",
+                "DB_USER": "fraud_admin",
+                "DB_PASSWORD": "secret",
+            }
+        )
+        try:
+            response = self.handler.handler({"action": "migrate_database_schema"}, None)
+        finally:
+            if original_connect is None:
+                delattr(self.handler.psycopg2, "connect")
+            else:
+                self.handler.psycopg2.connect = original_connect
+
+        body = json.loads(response["body"])
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["data"]["status"], "migrated")
+        self.assertEqual(body["data"]["migration_id"], self.handler.MIGRATION_ID)
+        self.assertTrue(connection.committed)
+        self.assertTrue(connection.closed)
+        self.assertFalse(connection.rolled_back)
+        self.assertEqual(connection.kwargs["application_name"], "fraud-detector-api-migration")
+        statements = connection.cursor_instance.executions
+        self.assertIn("CREATE TABLE IF NOT EXISTS transactions", statements[0][0])
+        self.assertIn("CREATE TABLE IF NOT EXISTS dashboard_access", statements[0][0])
+        self.assertIn("CREATE TABLE IF NOT EXISTS schema_migrations", statements[0][0])
+        self.assertIn("INSERT INTO schema_migrations", statements[1][0])
+        self.assertEqual(statements[1][1], (self.handler.MIGRATION_ID,))
+
+    def test_http_body_action_does_not_trigger_migration(self):
+        def fail_migration():
+            raise AssertionError("migration should not run for HTTP request bodies")
+
+        def fake_dispatch(event, path, query, path_params, method):
+            return self.handler._ok({"route": path, "method": method})
+
+        event = {
+            "rawPath": "/dashboard/me",
+            "body": json.dumps({"action": "migrate_database_schema"}),
+            "requestContext": {"requestId": "req-2", "http": {"method": "POST"}},
+        }
+
+        original_migration = self.handler._migrate_database_schema
+        original_dispatch = self.handler._dispatch_request
+        self.handler._migrate_database_schema = fail_migration
+        self.handler._dispatch_request = fake_dispatch
+        try:
+            response = self.handler.handler(event, None)
+        finally:
+            self.handler._migrate_database_schema = original_migration
+            self.handler._dispatch_request = original_dispatch
+
+        body = json.loads(response["body"])
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["data"]["route"], "/dashboard/me")
 
 if __name__ == "__main__":
     unittest.main()

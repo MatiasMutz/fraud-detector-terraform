@@ -168,12 +168,16 @@ jobs:
 
       - name: Terraform plan
         run: |
+          mkdir -p app/api/build app/notification/build
           terraform plan \
             -out=tfplan \
             -var "image_uri=${{ steps.processor_image.outputs.final_image }}"
 
       - name: Terraform apply
         run: terraform apply -auto-approve tfplan
+
+      - name: Migrate RDS schema
+        run: make migrate-db
 
       - name: Read dashboard deployment outputs
         id: dashboard

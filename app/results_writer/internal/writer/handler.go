@@ -20,32 +20,6 @@ const (
 	maxTraceSamples          = 20
 )
 
-const schemaSQL = `
-CREATE TABLE IF NOT EXISTS transactions (
-    id             SERIAL PRIMARY KEY,
-    transaction_id VARCHAR(255) UNIQUE NOT NULL,
-    user_id        VARCHAR(255),
-    amount         NUMERIC(15, 2),
-    currency       VARCHAR(10),
-    country        VARCHAR(100),
-    channel        VARCHAR(50),
-    fraud_score    FLOAT,
-    is_fraud       BOOLEAN,
-    decision       VARCHAR(20),
-    processed_at   TIMESTAMPTZ DEFAULT NOW(),
-    trace_id       VARCHAR(128),
-    ingested_at    TIMESTAMPTZ
-);
-ALTER TABLE transactions
-    ADD COLUMN IF NOT EXISTS trace_id VARCHAR(128),
-    ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ;
-CREATE INDEX IF NOT EXISTS idx_tx_processed_at ON transactions (processed_at DESC);
-CREATE INDEX IF NOT EXISTS idx_tx_is_fraud     ON transactions (is_fraud);
-CREATE INDEX IF NOT EXISTS idx_tx_user_id      ON transactions (user_id);
-CREATE INDEX IF NOT EXISTS idx_tx_trace_id     ON transactions (trace_id);
-CREATE INDEX IF NOT EXISTS idx_tx_ingested_at  ON transactions (ingested_at DESC);
-`
-
 type Event struct {
 	Records []Record `json:"Records"`
 }
@@ -104,10 +78,6 @@ func HandleWithRequest(ctx context.Context, db *sql.DB, event Event, awsRequestI
 	defer func() {
 		_ = tx.Rollback()
 	}()
-
-	if _, err := tx.ExecContext(ctx, schemaSQL); err != nil {
-		return Result{}, fmt.Errorf("ensure schema: %w", err)
-	}
 
 	inserted, err := insertRows(ctx, tx, rows)
 	if err != nil {
@@ -383,10 +353,7 @@ func latencySummary(rows []payload, now time.Time) (int, int64, int64, int64) {
 		if row.IngestedAt == nil {
 			continue
 		}
-		latency := now.Sub(row.IngestedAt.UTC()).Milliseconds()
-		if latency < 0 {
-			latency = 0
-		}
+		latency := max(now.Sub(row.IngestedAt.UTC()).Milliseconds(), 0)
 		if count == 0 || latency < minValue {
 			minValue = latency
 		}
