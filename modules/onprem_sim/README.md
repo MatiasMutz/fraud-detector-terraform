@@ -32,11 +32,11 @@ The module is intentionally minimal — single AZ, permissive security group, no
 | `azs`                       | `list(string)` | n/a                  | Available AZs; only the first is used for the on-prem public subnet.                         |
 | `onprem_vpc_cidr`           | `string`       | `"192.168.0.0/16"`   | CIDR of the simulated on-prem VPC. Must not overlap `aws_vpc_cidr`.                          |
 | `onprem_public_subnet_cidr` | `string`       | `"192.168.1.0/24"`   | CIDR of the public subnet that hosts the strongSwan EC2.                                     |
-| `instance_type`             | `string`       | `"t3a.micro"`        | EC2 type for the VPN gateway. Restricted to the values allowed by the CFN template.          |
+| `instance_type`             | `string`       | `"t3.micro"`         | EC2 type for the VPN gateway. Restricted to the values allowed by the CFN template.          |
 | `sqs_vpc_endpoint_network_interface_ids` | `list(string)` | `[]`    | ENIs of the SQS Interface VPC Endpoint in the AWS VPC. When non-empty, the module creates the SQS PHZ + apex A record. |
 | `enable_traffic_producers`  | `bool`         | `true`               | Create two EC2 producers that continuously send to the ingestion SQS queue.                  |
 | `ingestion_queue_url`       | `string`       | `""`                 | SQS queue URL wired into producer user-data (required when `enable_traffic_producers = true`). |
-| `producer_instance_type`    | `string`       | `"t3a.micro"`        | EC2 type for traffic producers.                                                              |
+| `producer_instance_type`    | `string`       | `"t3.micro"`         | EC2 type for traffic producers.                                                              |
 | `producer_batch_size`       | `number`       | `5`                  | Messages sent per producer loop iteration.                                                     |
 | `producer_loop_interval_sec`| `number`       | `12`                 | Sleep between iterations (~25 tx/min per producer; ~50 tx/min total with two producers).     |
 | `producer_fraud_pct`        | `number`       | `8`                  | Percentage of generated transactions with fraud patterns.                                    |

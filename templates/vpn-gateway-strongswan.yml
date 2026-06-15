@@ -296,11 +296,11 @@ Parameters:
   pInstanceType:
     Description: EC2 Instance Type
     Type: String
-    Default: t3a.micro
+    Default: t3.micro
     AllowedValues:
-      - t3a.micro
-      - t3a.small
-      - t3a.medium
+      - t3.micro
+      - t3.small
+      - t3.medium
     ConstraintDescription: must be a valid EC2 instance type.
 
   pAmiId:

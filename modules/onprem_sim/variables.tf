@@ -63,11 +63,11 @@ variable "onprem_public_subnet_cidr" {
 variable "instance_type" {
   description = "Tipo de instancia EC2 para el VPN gateway strongSwan. Restringido a los valores aceptados por la plantilla CloudFormation."
   type        = string
-  default     = "t3a.micro"
+  default     = "t3.micro"
 
   validation {
-    condition     = contains(["t3a.micro", "t3a.small", "t3a.medium"], var.instance_type)
-    error_message = "instance_type debe ser uno de t3a.micro, t3a.small o t3a.medium (valores permitidos por templates/vpn-gateway-strongswan.yml)."
+    condition     = contains(["t3.micro", "t3.small", "t3.medium"], var.instance_type)
+    error_message = "instance_type debe ser uno de t3.micro, t3.small o t3.medium (valores permitidos por templates/vpn-gateway-strongswan.yml)."
   }
 }
 
@@ -118,11 +118,11 @@ variable "ingestion_queue_url" {
 variable "producer_instance_type" {
   description = "Tipo de instancia EC2 para los productores de tráfico on-premise simulado."
   type        = string
-  default     = "t3a.micro"
+  default     = "t3.micro"
 
   validation {
-    condition     = contains(["t3a.micro", "t3a.small", "t3a.medium"], var.producer_instance_type)
-    error_message = "producer_instance_type debe ser uno de t3a.micro, t3a.small o t3a.medium."
+    condition     = contains(["t3.micro", "t3.small", "t3.medium"], var.producer_instance_type)
+    error_message = "producer_instance_type debe ser uno de t3.micro, t3.small o t3.medium."
   }
 }
 
