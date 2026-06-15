@@ -4,7 +4,10 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
+
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 def _load_json(path):
@@ -32,7 +35,14 @@ def terraform_output(name):
     return value
 
 
-def invoke(function_name, region):
+def _status_code(payload):
+    try:
+        return int(payload.get("statusCode", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _invoke_once(function_name, region):
     request_payload = json.dumps({"action": "migrate_database_schema"})
     with tempfile.NamedTemporaryFile(prefix="db-migration-", suffix=".json") as payload_file:
         cmd = [
@@ -56,27 +66,57 @@ def invoke(function_name, region):
         metadata = json.loads(completed.stdout or "{}")
         payload = _load_json(payload_file.name)
 
-    if metadata.get("FunctionError"):
-        raise RuntimeError(f"API Lambda migration action failed: {json.dumps(payload, sort_keys=True)}")
+    return metadata, payload
 
-    status_code = int(payload.get("statusCode", 0))
-    if status_code < 200 or status_code >= 300:
-        raise RuntimeError(f"API Lambda migration action returned statusCode={status_code}: {json.dumps(payload, sort_keys=True)}")
 
-    body = payload.get("body")
-    body_payload = json.loads(body) if isinstance(body, str) and body else {}
-    return body_payload.get("data", {})
+def invoke(function_name, region, *, max_attempts=8, retry_delay_seconds=10, max_retry_delay_seconds=60):
+    delay_seconds = retry_delay_seconds
+
+    for attempt in range(1, max_attempts + 1):
+        metadata, payload = _invoke_once(function_name, region)
+
+        if metadata.get("FunctionError"):
+            raise RuntimeError(f"API Lambda migration action failed: {json.dumps(payload, sort_keys=True)}")
+
+        status_code = _status_code(payload)
+        if 200 <= status_code < 300:
+            body = payload.get("body")
+            body_payload = json.loads(body) if isinstance(body, str) and body else {}
+            return body_payload.get("data", {})
+
+        message = f"API Lambda migration action returned statusCode={status_code}: {json.dumps(payload, sort_keys=True)}"
+        if status_code not in RETRYABLE_STATUS_CODES or attempt == max_attempts:
+            raise RuntimeError(message)
+
+        print(
+            f"db migration attempt {attempt}/{max_attempts} returned statusCode={status_code}; "
+            f"retrying in {delay_seconds:g}s",
+            file=sys.stderr,
+        )
+        time.sleep(delay_seconds)
+        delay_seconds = min(delay_seconds * 2, max_retry_delay_seconds)
+
+    raise RuntimeError("API Lambda migration action did not return a response")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Invoke the API Lambda direct RDS schema migration action and fail on migration errors.")
     parser.add_argument("--function", help="API Lambda function name. Defaults to Terraform output api_lambda_name.")
     parser.add_argument("--region", default="us-east-1", help="AWS region.")
+    parser.add_argument("--max-attempts", type=int, default=8, help="Maximum migration invoke attempts for transient Lambda responses.")
+    parser.add_argument("--retry-delay-seconds", type=float, default=10, help="Initial delay between transient migration retries.")
+    parser.add_argument("--max-retry-delay-seconds", type=float, default=60, help="Maximum delay between transient migration retries.")
     args = parser.parse_args()
 
     try:
         function_name = args.function or terraform_output("api_lambda_name")
-        data = invoke(function_name, args.region)
+        data = invoke(
+            function_name,
+            args.region,
+            max_attempts=max(1, args.max_attempts),
+            retry_delay_seconds=max(0, args.retry_delay_seconds),
+            max_retry_delay_seconds=max(0, args.max_retry_delay_seconds),
+        )
     except Exception as exc:
         print(f"db migration failed: {exc}", file=sys.stderr)
         return 1
