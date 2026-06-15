@@ -10,9 +10,10 @@ MODEL_PREP_FALLBACK_FILE_URL := https://drive.google.com/file/d/1Gut3LFjfYVpIEHJ
 MODEL_PREP_FALLBACK_URL := https://drive.google.com/drive/folders/1DfGgK6dTXP-IS3bdqSl_kBCIkr6P9NR6?usp=sharing
 
 LAMBDA_WRITER ?= itba-tp-fraud-results-writer
+API_LAMBDA    ?=
 ONPREM_STACK  ?= itba-tp-fraud-onprem-strongswan
 LOG_GROUP     ?= /ecs/itba-tp-fraud-fraud-engine
-REGION        ?= us-east-1
+REGION        ?= $(if $(AWS_REGION),$(AWS_REGION),us-east-1)
 COUNT         ?= 1000
 DAYS          ?= 30
 TX_COUNT      ?= 50000
@@ -25,7 +26,7 @@ BOOTSTRAP_EMAIL            ?=
 BOOTSTRAP_PASSWORD         ?=
 BOOTSTRAP_DISPLAY_NAME     ?= Bootstrap Admin
 
-.PHONY: help fmt fmt-check validate lint init plan apply destroy clean build-layers build-results-writer prepare-model model-prep seed bootstrap-auth send-test-tx logs
+.PHONY: help fmt fmt-check validate lint init plan apply destroy clean build-layers build-results-writer prepare-model model-prep migrate-db seed bootstrap-auth send-test-tx logs
 
 help:
 	@echo "Targets:"
@@ -39,6 +40,7 @@ help:
 	@echo "  make init             Initialize the working directory"
 	@echo "  make plan             Plan (writes tfplan)"
 	@echo "  make apply            Apply the saved plan"
+	@echo "  make migrate-db       Invoke the API Lambda direct migration action"
 	@echo "  make destroy          Destroy all managed infrastructure"
 	@echo "  make clean            Remove .terraform/ and tfplan files"
 	@echo "  make seed             Seed RDS with ~COUNT mock transactions (default COUNT=1000, DAYS=30)"
@@ -163,6 +165,13 @@ prepare-model:
 	  --drive-folder-url "$(MODEL_PREP_FALLBACK_URL)"
 
 model-prep: prepare-model
+
+migrate-db:
+	@if [ -n "$(API_LAMBDA)" ]; then \
+	  $(PYTHON) scripts/invoke_db_migration.py --function "$(API_LAMBDA)" --region "$(REGION)"; \
+	else \
+	  $(PYTHON) scripts/invoke_db_migration.py --region "$(REGION)"; \
+	fi
 
 seed:
 	$(PYTHON) scripts/generate_mock_data.py \

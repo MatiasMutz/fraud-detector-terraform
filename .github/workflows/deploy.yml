@@ -155,25 +155,25 @@ jobs:
         run: |
           docker tag "fraud-worker:${GITHUB_SHA}" "${{ steps.ecr.outputs.processor_image }}"
           docker tag "fraud-worker:${GITHUB_SHA}" "${{ steps.ecr.outputs.processor_source_image }}"
-          docker tag "fraud-worker:${GITHUB_SHA}" "${{ steps.ecr.outputs.url }}:processor-latest"
-          docker tag "fraud-worker:${GITHUB_SHA}" "${{ steps.ecr.outputs.url }}:latest"
 
       - name: Push processor image
         if: steps.processor_image.outputs.should_build == 'true'
         run: |
           docker push "${{ steps.ecr.outputs.processor_image }}"
           docker push "${{ steps.ecr.outputs.processor_source_image }}"
-          docker push "${{ steps.ecr.outputs.url }}:processor-latest"
-          docker push "${{ steps.ecr.outputs.url }}:latest"
 
       - name: Terraform plan
         run: |
+          mkdir -p app/api/build app/notification/build
           terraform plan \
             -out=tfplan \
             -var "image_uri=${{ steps.processor_image.outputs.final_image }}"
 
       - name: Terraform apply
         run: terraform apply -auto-approve tfplan
+
+      - name: Migrate RDS schema
+        run: make migrate-db
 
       - name: Read dashboard deployment outputs
         id: dashboard

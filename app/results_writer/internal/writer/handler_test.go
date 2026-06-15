@@ -110,6 +110,10 @@ func TestBuildInsertStatementChunksRows(t *testing.T) {
 	}
 }
 
+func boolPtr(value bool) *bool {
+	return &value
+}
+
 func TestWriterLogRecordOmitsSensitiveFields(t *testing.T) {
 	record := writerLogRecord("results_batch_committed", map[string]any{
 		"trace_id_samples":    []string{"trace-safe"},
@@ -147,7 +151,7 @@ func TestWriterLogRecordOmitsSensitiveFields(t *testing.T) {
 
 func TestTraceSummaryCapsSamples(t *testing.T) {
 	rows := make([]payload, 0, maxTraceSamples+2)
-	for idx := 0; idx < maxTraceSamples+2; idx++ {
+	for idx := range maxTraceSamples+2 {
 		traceID := "trace-" + string(rune('a'+idx))
 		rows = append(rows, payload{TraceID: &traceID})
 	}
@@ -159,8 +163,4 @@ func TestTraceSummaryCapsSamples(t *testing.T) {
 	if got, want := len(samples), maxTraceSamples; got != want {
 		t.Fatalf("sample count = %d, want %d", got, want)
 	}
-}
-
-func boolPtr(value bool) *bool {
-	return &value
 }

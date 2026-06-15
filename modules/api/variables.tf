@@ -131,7 +131,7 @@ variable "package_file" {
 variable "timeout_seconds" {
   description = "Timeout de la Lambda API en segundos."
   type        = number
-  default     = 30
+  default     = 120
 
   validation {
     condition     = var.timeout_seconds >= 1 && var.timeout_seconds <= 900

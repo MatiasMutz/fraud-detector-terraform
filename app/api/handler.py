@@ -10,7 +10,8 @@ from urllib.parse import unquote
 import boto3
 import psycopg2
 import psycopg2.extras
-from botocore.exceptions import ClientError
+from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -49,119 +50,274 @@ _SORTABLE_USERS = {
     "fraud_rate_pct": "fraud_rate_pct",
 }
 
+MIGRATION_ID = "2026_06_15_001_dashboard_api_schema"
+
+SCHEMA_SQL = """
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE TABLE IF NOT EXISTS transactions (
+    id             SERIAL PRIMARY KEY,
+    transaction_id VARCHAR(255) UNIQUE NOT NULL,
+    user_id        VARCHAR(255),
+    amount         NUMERIC(15, 2),
+    currency       VARCHAR(10),
+    country        VARCHAR(100),
+    channel        VARCHAR(50),
+    fraud_score    FLOAT,
+    is_fraud       BOOLEAN,
+    decision       VARCHAR(20),
+    processed_at   TIMESTAMPTZ DEFAULT NOW(),
+    trace_id       VARCHAR(128),
+    ingested_at    TIMESTAMPTZ
+);
+
+ALTER TABLE transactions
+    ADD COLUMN IF NOT EXISTS trace_id VARCHAR(128),
+    ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_tx_processed_at ON transactions (processed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tx_is_fraud     ON transactions (is_fraud);
+CREATE INDEX IF NOT EXISTS idx_tx_user_id      ON transactions (user_id);
+CREATE INDEX IF NOT EXISTS idx_tx_country      ON transactions (country);
+CREATE INDEX IF NOT EXISTS idx_tx_channel      ON transactions (channel);
+CREATE INDEX IF NOT EXISTS idx_tx_trace_id     ON transactions (trace_id);
+CREATE INDEX IF NOT EXISTS idx_tx_ingested_at  ON transactions (ingested_at DESC);
+
+CREATE TABLE IF NOT EXISTS dashboard_access (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email              TEXT NOT NULL,
+    email_normalized   TEXT NOT NULL UNIQUE,
+    display_name       TEXT,
+    role               TEXT NOT NULL CHECK (role IN ('admin', 'viewer')),
+    status             TEXT NOT NULL CHECK (status IN ('pending', 'active', 'disabled')),
+    cognito_sub        TEXT,
+    invited_by_email   TEXT,
+    is_bootstrap_admin BOOLEAN NOT NULL DEFAULT FALSE,
+    invited_at         TIMESTAMPTZ,
+    activated_at       TIMESTAMPTZ,
+    disabled_at        TIMESTAMPTZ,
+    last_login_at      TIMESTAMPTZ,
+    summary_sns_subscription_arn        TEXT,
+    summary_sns_subscription_status     TEXT,
+    summary_sns_subscription_warning    TEXT,
+    summary_sns_subscription_updated_at TIMESTAMPTZ,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE dashboard_access
+    ADD COLUMN IF NOT EXISTS email TEXT,
+    ADD COLUMN IF NOT EXISTS email_normalized TEXT,
+    ADD COLUMN IF NOT EXISTS display_name TEXT,
+    ADD COLUMN IF NOT EXISTS role TEXT,
+    ADD COLUMN IF NOT EXISTS status TEXT,
+    ADD COLUMN IF NOT EXISTS cognito_sub TEXT,
+    ADD COLUMN IF NOT EXISTS invited_by_email TEXT,
+    ADD COLUMN IF NOT EXISTS is_bootstrap_admin BOOLEAN,
+    ADD COLUMN IF NOT EXISTS invited_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS activated_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS summary_sns_subscription_arn TEXT,
+    ADD COLUMN IF NOT EXISTS summary_sns_subscription_status TEXT,
+    ADD COLUMN IF NOT EXISTS summary_sns_subscription_warning TEXT,
+    ADD COLUMN IF NOT EXISTS summary_sns_subscription_updated_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+
+UPDATE dashboard_access
+SET email_normalized = COALESCE(email_normalized, LOWER(TRIM(email))),
+    role = COALESCE(role, 'viewer'),
+    status = COALESCE(status, 'active'),
+    is_bootstrap_admin = COALESCE(is_bootstrap_admin, FALSE),
+    created_at = COALESCE(created_at, NOW()),
+    updated_at = COALESCE(updated_at, NOW());
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dashboard_access_email_normalized_unique
+    ON dashboard_access (email_normalized);
+
+CREATE INDEX IF NOT EXISTS idx_dashboard_access_role
+    ON dashboard_access (role);
+CREATE INDEX IF NOT EXISTS idx_dashboard_access_status
+    ON dashboard_access (status);
+CREATE INDEX IF NOT EXISTS idx_dashboard_access_cognito_sub
+    ON dashboard_access (cognito_sub);
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    id         TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
+
+def _env_int(name, default, *, minimum=1, maximum=None):
+    try:
+        value = int(os.getenv(name, ""))
+    except (TypeError, ValueError):
+        value = default
+    value = max(value, minimum)
+    if maximum is not None:
+        value = min(value, maximum)
+    return value
+
+
+def _db_connect_timeout_seconds():
+    return _env_int("API_DB_CONNECT_TIMEOUT_SECONDS", 3, minimum=1, maximum=10)
+
+
+def _db_statement_timeout_ms():
+    return _env_int("API_DB_STATEMENT_TIMEOUT_MS", 10_000, minimum=1_000, maximum=25_000)
+
+
+def _db_lock_timeout_ms():
+    return _env_int("API_DB_LOCK_TIMEOUT_MS", 2_000, minimum=500, maximum=10_000)
+
+
+def _migration_db_statement_timeout_ms():
+    return _env_int("MIGRATION_DB_STATEMENT_TIMEOUT_MS", 25_000, minimum=5_000, maximum=25_000)
+
+
+def _migration_db_lock_timeout_ms():
+    return _env_int("MIGRATION_DB_LOCK_TIMEOUT_MS", 10_000, minimum=1_000, maximum=20_000)
+
+
+def _aws_connect_timeout_seconds():
+    return _env_int("API_AWS_CONNECT_TIMEOUT_SECONDS", 2, minimum=1, maximum=10)
+
+
+def _aws_read_timeout_seconds():
+    return _env_int("API_AWS_READ_TIMEOUT_SECONDS", 5, minimum=1, maximum=20)
+
+
+def _db_session_settings():
+    return [
+        ("statement_timeout", _db_statement_timeout_ms()),
+        ("lock_timeout", _db_lock_timeout_ms()),
+        ("idle_in_transaction_session_timeout", 15_000),
+    ]
+
+
+def _migration_db_session_settings():
+    return [
+        ("statement_timeout", _migration_db_statement_timeout_ms()),
+        ("lock_timeout", _migration_db_lock_timeout_ms()),
+        ("idle_in_transaction_session_timeout", 25_000),
+    ]
+
+
+def _configure_db_session(conn, settings):
+    # RDS Proxy rejects libpq startup command-line options; apply GUCs after connect.
+    with conn.cursor() as cur:
+        for name, value in settings:
+            cur.execute(f"SET SESSION {name} = %s", (value,))
+    conn.commit()
+
+
+def _aws_client_config():
+    return Config(
+        connect_timeout=_aws_connect_timeout_seconds(),
+        read_timeout=_aws_read_timeout_seconds(),
+        retries={"max_attempts": 2, "mode": "standard"},
+    )
+
+
+def _aws_client(service_name):
+    return boto3.client(
+        service_name,
+        region_name=os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION"),
+        config=_aws_client_config(),
+    )
+
 
 def _get_conn():
     global _conn
     if _conn is None or _conn.closed:
-        _conn = psycopg2.connect(
+        conn = psycopg2.connect(
             host=os.environ["DB_HOST"],
             port=int(os.environ["DB_PORT"]),
             dbname=os.environ["DB_NAME"],
             user=os.environ["DB_USER"],
             password=os.environ["DB_PASSWORD"],
             sslmode="require",
-            connect_timeout=5,
+            connect_timeout=_db_connect_timeout_seconds(),
+            application_name="fraud-detector-api",
         )
+        try:
+            _configure_db_session(conn, _db_session_settings())
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
+        _conn = conn
     return _conn
 
 
-def _ensure_schema(conn):
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            CREATE EXTENSION IF NOT EXISTS pgcrypto;
+def _get_migration_conn():
+    conn = psycopg2.connect(
+        host=os.environ["DB_HOST"],
+        port=int(os.environ["DB_PORT"]),
+        dbname=os.environ["DB_NAME"],
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"],
+        sslmode="require",
+        connect_timeout=_db_connect_timeout_seconds(),
+        application_name="fraud-detector-api-migration",
+    )
+    try:
+        _configure_db_session(conn, _migration_db_session_settings())
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
+    return conn
 
-            CREATE TABLE IF NOT EXISTS transactions (
-                id             SERIAL PRIMARY KEY,
-                transaction_id VARCHAR(255) UNIQUE NOT NULL,
-                user_id        VARCHAR(255),
-                amount         NUMERIC(15, 2),
-                currency       VARCHAR(10),
-                country        VARCHAR(100),
-                channel        VARCHAR(50),
-                fraud_score    FLOAT,
-                is_fraud       BOOLEAN,
-                decision       VARCHAR(20),
-                processed_at   TIMESTAMPTZ DEFAULT NOW(),
-                trace_id       VARCHAR(128),
-                ingested_at    TIMESTAMPTZ
-            );
 
-            ALTER TABLE transactions
-                ADD COLUMN IF NOT EXISTS trace_id VARCHAR(128),
-                ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ;
+def _close_conn():
+    global _conn
+    conn = _conn
+    _conn = None
+    if conn is None or getattr(conn, "closed", True):
+        return
+    try:
+        conn.close()
+    except Exception:
+        pass
 
-            CREATE INDEX IF NOT EXISTS idx_tx_processed_at ON transactions (processed_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_tx_is_fraud     ON transactions (is_fraud);
-            CREATE INDEX IF NOT EXISTS idx_tx_user_id      ON transactions (user_id);
-            CREATE INDEX IF NOT EXISTS idx_tx_country      ON transactions (country);
-            CREATE INDEX IF NOT EXISTS idx_tx_channel      ON transactions (channel);
-            CREATE INDEX IF NOT EXISTS idx_tx_trace_id     ON transactions (trace_id);
-            CREATE INDEX IF NOT EXISTS idx_tx_ingested_at  ON transactions (ingested_at DESC);
 
-            CREATE TABLE IF NOT EXISTS dashboard_access (
-                id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                email              TEXT NOT NULL,
-                email_normalized   TEXT NOT NULL UNIQUE,
-                display_name       TEXT,
-                role               TEXT NOT NULL CHECK (role IN ('admin', 'viewer')),
-                status             TEXT NOT NULL CHECK (status IN ('pending', 'active', 'disabled')),
-                cognito_sub        TEXT,
-                invited_by_email   TEXT,
-                is_bootstrap_admin BOOLEAN NOT NULL DEFAULT FALSE,
-                invited_at         TIMESTAMPTZ,
-                activated_at       TIMESTAMPTZ,
-                disabled_at        TIMESTAMPTZ,
-                last_login_at      TIMESTAMPTZ,
-                summary_sns_subscription_arn        TEXT,
-                summary_sns_subscription_status     TEXT,
-                summary_sns_subscription_warning    TEXT,
-                summary_sns_subscription_updated_at TIMESTAMPTZ,
-                created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
+def _migrate_database_schema():
+    started = perf_counter()
+    conn = None
+    try:
+        conn = _get_migration_conn()
+        with conn.cursor() as cur:
+            cur.execute(SCHEMA_SQL)
+            cur.execute(
+                """
+                INSERT INTO schema_migrations (id, applied_at)
+                VALUES (%s, NOW())
+                ON CONFLICT (id) DO UPDATE SET applied_at = EXCLUDED.applied_at
+                """,
+                (MIGRATION_ID,),
+            )
+        conn.commit()
+    except Exception:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        raise
+    finally:
+        if conn is not None:
+            conn.close()
 
-            ALTER TABLE dashboard_access
-                ADD COLUMN IF NOT EXISTS email TEXT,
-                ADD COLUMN IF NOT EXISTS email_normalized TEXT,
-                ADD COLUMN IF NOT EXISTS display_name TEXT,
-                ADD COLUMN IF NOT EXISTS role TEXT,
-                ADD COLUMN IF NOT EXISTS status TEXT,
-                ADD COLUMN IF NOT EXISTS cognito_sub TEXT,
-                ADD COLUMN IF NOT EXISTS invited_by_email TEXT,
-                ADD COLUMN IF NOT EXISTS is_bootstrap_admin BOOLEAN,
-                ADD COLUMN IF NOT EXISTS invited_at TIMESTAMPTZ,
-                ADD COLUMN IF NOT EXISTS activated_at TIMESTAMPTZ,
-                ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ,
-                ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ,
-                ADD COLUMN IF NOT EXISTS summary_sns_subscription_arn TEXT,
-                ADD COLUMN IF NOT EXISTS summary_sns_subscription_status TEXT,
-                ADD COLUMN IF NOT EXISTS summary_sns_subscription_warning TEXT,
-                ADD COLUMN IF NOT EXISTS summary_sns_subscription_updated_at TIMESTAMPTZ,
-                ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
-                ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
-
-            UPDATE dashboard_access
-            SET email_normalized = COALESCE(email_normalized, LOWER(TRIM(email))),
-                role = COALESCE(role, 'viewer'),
-                status = COALESCE(status, 'active'),
-                is_bootstrap_admin = COALESCE(is_bootstrap_admin, FALSE),
-                created_at = COALESCE(created_at, NOW()),
-                updated_at = COALESCE(updated_at, NOW());
-
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_dashboard_access_email_normalized_unique
-                ON dashboard_access (email_normalized);
-
-            CREATE INDEX IF NOT EXISTS idx_dashboard_access_role
-                ON dashboard_access (role);
-            CREATE INDEX IF NOT EXISTS idx_dashboard_access_status
-                ON dashboard_access (status);
-            CREATE INDEX IF NOT EXISTS idx_dashboard_access_cognito_sub
-                ON dashboard_access (cognito_sub);
-            """
-        )
-    conn.commit()
-
+    duration_ms = round((perf_counter() - started) * 1000)
+    _safe_log("db_migration_completed", migration_id=MIGRATION_ID, duration_ms=duration_ms)
+    return _ok({"status": "migrated", "migration_id": MIGRATION_ID, "duration_ms": duration_ms})
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -333,7 +489,7 @@ def _serialize_row(row):
 def _get_dynamodb_client():
     global _dynamodb_client
     if _dynamodb_client is None:
-        _dynamodb_client = boto3.client("dynamodb", region_name=os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION"))
+        _dynamodb_client = _aws_client("dynamodb")
     return _dynamodb_client
 
 
@@ -607,7 +763,7 @@ def _subscribe_summary_email(email):
     if not topic_arn:
         raise RuntimeError("SUMMARY_SNS_TOPIC_ARN is not configured")
 
-    client = boto3.client("sns", region_name=os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION"))
+    client = _aws_client("sns")
     existing_arn = _find_summary_subscription_arn(client, topic_arn, email)
     if existing_arn:
         return existing_arn
@@ -634,7 +790,7 @@ def _find_summary_subscription_arn(client, topic_arn, email):
 def _unsubscribe_summary_email(subscription_arn):
     if not subscription_arn:
         return
-    client = boto3.client("sns", region_name=os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION"))
+    client = _aws_client("sns")
     client.unsubscribe(SubscriptionArn=subscription_arn)
 
 
@@ -713,13 +869,12 @@ def _try_subscribe_summary_standalone(email):
     }
 
 
-def _authorize_access(event, *, activate_pending=False):
+def _authorize_access(event, *, activate_pending=False, touch_login=False):
     identity, error = _request_identity(event)
     if error is not None:
         return None, error
 
     conn = _get_conn()
-    _ensure_schema(conn)
 
     with conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -728,7 +883,6 @@ def _authorize_access(event, *, activate_pending=False):
                 SELECT *
                 FROM dashboard_access
                 WHERE email_normalized = %s
-                FOR UPDATE
                 """,
                 (identity["email_normalized"],),
             )
@@ -756,7 +910,7 @@ def _authorize_access(event, *, activate_pending=False):
                 )
                 row = cur.fetchone()
                 row = _try_subscribe_summary_for_access(cur, row)
-            else:
+            elif touch_login:
                 row = _touch_access_row(cur, row["id"], identity["cognito_sub"])
 
     return {"identity": identity, "access": row}, None
@@ -794,7 +948,6 @@ def _bootstrap_dashboard_admin(event):
     alert_email_normalized = _normalize_email(alert_email) if alert_email else ""
 
     conn = _get_conn()
-    _ensure_schema(conn)
 
     standalone_subscription = None
     with conn:
@@ -880,13 +1033,13 @@ def _health():
             cur.execute("SELECT 1")
         return _ok({"status": "ok"})
     except Exception as exc:
+        _close_conn()
         _safe_log("api_health_failed", level="ERROR", error_class=_error_class(exc))
         return _err(503, "SERVICE_UNAVAILABLE", "Database unreachable")
 
 
 def _get_stats(query):
     conn = _get_conn()
-    _ensure_schema(conn)
     where, params = _build_where(query)
     with conn.cursor() as cur:
         cur.execute(
@@ -921,7 +1074,6 @@ def _get_stats(query):
 
 def _get_stats_timeseries(query):
     conn = _get_conn()
-    _ensure_schema(conn)
 
     granularity = query.get("granularity", "hour")
     if granularity not in ("second", "minute", "hour", "day"):
@@ -960,7 +1112,6 @@ def _get_stats_timeseries(query):
 
 def _get_filters():
     conn = _get_conn()
-    _ensure_schema(conn)
     with conn.cursor() as cur:
         cur.execute("SELECT DISTINCT country FROM transactions WHERE country IS NOT NULL ORDER BY country")
         countries = [r[0] for r in cur.fetchall()]
@@ -971,7 +1122,6 @@ def _get_filters():
 
 def _list_transactions(query):
     conn = _get_conn()
-    _ensure_schema(conn)
 
     limit = _parse_int(query.get("limit"), 20, minimum=1, maximum=100)
     offset = _parse_int(query.get("offset"), 0, minimum=0)
@@ -1011,7 +1161,6 @@ def _list_transactions(query):
 
 def _get_transaction(tx_id):
     conn = _get_conn()
-    _ensure_schema(conn)
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
@@ -1029,7 +1178,6 @@ def _get_transaction(tx_id):
 
 def _list_users(query):
     conn = _get_conn()
-    _ensure_schema(conn)
 
     limit = _parse_int(query.get("limit"), 20, minimum=1, maximum=100)
     offset = _parse_int(query.get("offset"), 0, minimum=0)
@@ -1099,7 +1247,6 @@ def _list_users(query):
 
 def _get_user(user_id):
     conn = _get_conn()
-    _ensure_schema(conn)
 
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
@@ -1158,7 +1305,6 @@ def _list_dashboard_invites(access):
         return admin_error
 
     conn = _get_conn()
-    _ensure_schema(conn)
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
@@ -1184,7 +1330,6 @@ def _upsert_dashboard_invite(access, body):
     display_name = body.get("display_name")
 
     conn = _get_conn()
-    _ensure_schema(conn)
 
     with conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -1292,7 +1437,6 @@ def _delete_dashboard_invite(access, invite_id):
         return admin_error
 
     conn = _get_conn()
-    _ensure_schema(conn)
 
     with conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -1375,7 +1519,7 @@ def _change_dashboard_password(access, event):
     if not access_token:
         return _err(401, "ACCESS_TOKEN_REQUIRED", "X-Cognito-Access-Token is required")
 
-    client = boto3.client("cognito-idp", region_name=os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION"))
+    client = _aws_client("cognito-idp")
 
     try:
         cognito_user = client.get_user(AccessToken=access_token)
@@ -1419,7 +1563,11 @@ def _dispatch_request(event, path, query, path_params, method):
     protected_identity = None
 
     if path != "/health":
-        auth_result, auth_error = _authorize_access(event, activate_pending=(path == "/dashboard/me"))
+        auth_result, auth_error = _authorize_access(
+            event,
+            activate_pending=(path == "/dashboard/me"),
+            touch_login=(path == "/dashboard/me"),
+        )
         if auth_error is not None:
             return auth_error
         protected_identity = auth_result["identity"]
@@ -1472,14 +1620,38 @@ def handler(event, context):
     method = ((event.get("requestContext") or {}).get("http") or {}).get("method", "")
     route = _route_template(path, path_params)
     error_class = None
+    action = event.get("action")
+    is_bootstrap = action == "bootstrap_dashboard_admin"
+    is_migration = action == "migrate_database_schema"
+
+    if is_bootstrap or is_migration:
+        method = "INVOKE"
+        route = action
+
+    _safe_log(
+        "api_request_started",
+        trace_id=trace_id,
+        request_id=request_id,
+        method=method,
+        route=route,
+    )
 
     try:
-        if event.get("action") == "bootstrap_dashboard_admin":
-            method = "INVOKE"
-            route = "bootstrap_dashboard_admin"
+        if is_migration:
+            response = _migrate_database_schema()
+        elif is_bootstrap:
             response = _bootstrap_dashboard_admin(event)
         else:
             response = _dispatch_request(event, path, query, path_params, method)
+    except (psycopg2.OperationalError, psycopg2.DatabaseError) as exc:
+        error_class = _error_class(exc)
+        _close_conn()
+        logger.exception("api_database_error")
+        response = _err(503, "SERVICE_UNAVAILABLE", "Database temporarily unavailable")
+    except (BotoCoreError, ClientError) as exc:
+        error_class = _error_class(exc)
+        logger.exception("api_aws_client_error")
+        response = _err(502, "UPSTREAM_UNAVAILABLE", "Upstream AWS service temporarily unavailable")
     except Exception as exc:
         error_class = _error_class(exc)
         logger.exception("api_unhandled_exception")
