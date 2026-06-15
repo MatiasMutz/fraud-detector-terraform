@@ -89,7 +89,7 @@ resource "aws_lambda_function" "api" {
   role                           = var.principal_arn
   runtime                        = "python3.12"
   handler                        = "handler.handler"
-  timeout                        = 15
+  timeout                        = var.timeout_seconds
   memory_size                    = 256
   layers                         = [var.psycopg2_layer_arn]
   reserved_concurrent_executions = 3 # AWS Academy account cap is 10 concurrent Lambdas total

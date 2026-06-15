@@ -126,6 +126,7 @@ module "api" {
   jwt_issuer                 = module.auth.issuer
   jwt_audience               = module.auth.client_id
   package_file               = data.archive_file.api_lambda.output_path
+  timeout_seconds            = var.api_lambda_timeout_seconds
   tags                       = local.common_tags
 }
 

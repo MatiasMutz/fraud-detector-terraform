@@ -103,6 +103,17 @@ variable "results_writer_batching_window_seconds" {
   }
 }
 
+variable "api_lambda_timeout_seconds" {
+  description = "Timeout de la Lambda API en segundos. Aumentarlo permite consultas agregadas del dashboard con más margen antes de que API Gateway reciba un 500 por timeout."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.api_lambda_timeout_seconds >= 1 && var.api_lambda_timeout_seconds <= 900
+    error_message = "api_lambda_timeout_seconds debe estar entre 1 y 900 segundos."
+  }
+}
+
 variable "enable_onprem_sim" {
   description = "Habilita la VPC simulada de on-premise con su EC2 strongSwan, Customer Gateway, conexión Site-to-Site VPN contra el VGW y la Private Hosted Zone para SQS. La ingesta queda acotada arquitecturalmente por VPN + VPCE + SG (sin condiciones aws:SourceVpc en la cola)."
   type        = bool

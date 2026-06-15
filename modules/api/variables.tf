@@ -128,6 +128,17 @@ variable "package_file" {
   }
 }
 
+variable "timeout_seconds" {
+  description = "Timeout de la Lambda API en segundos."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.timeout_seconds >= 1 && var.timeout_seconds <= 900
+    error_message = "timeout_seconds debe estar entre 1 y 900 segundos."
+  }
+}
+
 variable "log_retention_days" {
   description = "Días de retención de los logs en CloudWatch Logs."
   type        = number

@@ -7,7 +7,7 @@ Provisions the dashboard API: a Lambda function running inside the VPC (to reach
 - `aws_cloudwatch_log_group.api_lambda` — `/aws/lambda/<project>-api`. 30-day retention by default.
 - `aws_cloudwatch_log_group.api_gw` — `/aws/apigateway/<project>-api`. 30-day retention by default.
 - `aws_security_group.api_lambda` — `<project>-api-lambda-sg`. No ingress; egress to the VPC endpoint SG on tcp/443 (Logs). The egress rule to RDS Proxy (tcp/5432) is created in the root composition to avoid circular module dependencies.
-- `aws_lambda_function.api` — `<project>-api`. Python 3.12, 256 MiB, 15 s timeout, deployed in VPC private subnets. Receives `DB_*`, `SUMMARY_SNS_TOPIC_ARN`, and `USER_BEHAVIOR_TABLE_NAME` env vars and uses the psycopg2 Lambda layer to query RDS.
+- `aws_lambda_function.api` — `<project>-api`. Python 3.12, 256 MiB, configurable timeout (30 s by default), deployed in VPC private subnets. Receives `DB_*`, `SUMMARY_SNS_TOPIC_ARN`, and `USER_BEHAVIOR_TABLE_NAME` env vars and uses the psycopg2 Lambda layer to query RDS.
 - `aws_apigatewayv2_api.main` — `<project>-api`. HTTP API (not REST API — simpler, cheaper). CORS configured for dashboard read/admin methods from any origin.
 - `aws_apigatewayv2_stage.default` — `$default` stage with `auto_deploy = true`.
 - `aws_apigatewayv2_integration.lambda` — `AWS_PROXY` integration, payload format version `2.0`.
@@ -40,6 +40,7 @@ Provisions the dashboard API: a Lambda function running inside the VPC (to reach
 | `jwt_issuer`                | `string`       | n/a     | Cognito issuer URL used by the JWT authorizer.                                 |
 | `jwt_audience`              | `string`       | n/a     | Cognito app client ID used as JWT audience.                                    |
 | `package_file`              | `string`       | n/a     | Path to the pre-built Lambda deployment zip (from `app/api/handler.py` at root). |
+| `timeout_seconds`           | `number`       | `30`    | API Lambda timeout in seconds.                                                 |
 | `log_retention_days`        | `number`       | `30`    | CloudWatch Logs retention days (Lambda and API Gateway log groups).           |
 
 ## Outputs
