@@ -39,7 +39,7 @@ resource "aws_s3_bucket_versioning" "dashboard" {
   bucket = aws_s3_bucket.dashboard.id
 
   versioning_configuration {
-    status = "Enabled"
+    status = "Suspended"
   }
 }
 
