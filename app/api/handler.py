@@ -189,24 +189,28 @@ def _aws_read_timeout_seconds():
     return _env_int("API_AWS_READ_TIMEOUT_SECONDS", 5, minimum=1, maximum=20)
 
 
-def _db_options():
-    return " ".join(
-        [
-            f"-c statement_timeout={_db_statement_timeout_ms()}",
-            f"-c lock_timeout={_db_lock_timeout_ms()}",
-            "-c idle_in_transaction_session_timeout=15000",
-        ]
-    )
+def _db_session_settings():
+    return [
+        ("statement_timeout", _db_statement_timeout_ms()),
+        ("lock_timeout", _db_lock_timeout_ms()),
+        ("idle_in_transaction_session_timeout", 15_000),
+    ]
 
 
-def _migration_db_options():
-    return " ".join(
-        [
-            f"-c statement_timeout={_migration_db_statement_timeout_ms()}",
-            f"-c lock_timeout={_migration_db_lock_timeout_ms()}",
-            "-c idle_in_transaction_session_timeout=25000",
-        ]
-    )
+def _migration_db_session_settings():
+    return [
+        ("statement_timeout", _migration_db_statement_timeout_ms()),
+        ("lock_timeout", _migration_db_lock_timeout_ms()),
+        ("idle_in_transaction_session_timeout", 25_000),
+    ]
+
+
+def _configure_db_session(conn, settings):
+    # RDS Proxy rejects libpq startup command-line options; apply GUCs after connect.
+    with conn.cursor() as cur:
+        for name, value in settings:
+            cur.execute(f"SET SESSION {name} = %s", (value,))
+    conn.commit()
 
 
 def _aws_client_config():
@@ -228,7 +232,7 @@ def _aws_client(service_name):
 def _get_conn():
     global _conn
     if _conn is None or _conn.closed:
-        _conn = psycopg2.connect(
+        conn = psycopg2.connect(
             host=os.environ["DB_HOST"],
             port=int(os.environ["DB_PORT"]),
             dbname=os.environ["DB_NAME"],
@@ -236,14 +240,22 @@ def _get_conn():
             password=os.environ["DB_PASSWORD"],
             sslmode="require",
             connect_timeout=_db_connect_timeout_seconds(),
-            options=_db_options(),
             application_name="fraud-detector-api",
         )
+        try:
+            _configure_db_session(conn, _db_session_settings())
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
+        _conn = conn
     return _conn
 
 
 def _get_migration_conn():
-    return psycopg2.connect(
+    conn = psycopg2.connect(
         host=os.environ["DB_HOST"],
         port=int(os.environ["DB_PORT"]),
         dbname=os.environ["DB_NAME"],
@@ -251,9 +263,17 @@ def _get_migration_conn():
         password=os.environ["DB_PASSWORD"],
         sslmode="require",
         connect_timeout=_db_connect_timeout_seconds(),
-        options=_migration_db_options(),
         application_name="fraud-detector-api-migration",
     )
+    try:
+        _configure_db_session(conn, _migration_db_session_settings())
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
+    return conn
 
 
 def _close_conn():

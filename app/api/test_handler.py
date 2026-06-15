@@ -164,6 +164,7 @@ class ApiTraceLoggingTests(unittest.TestCase):
                 self.kwargs = kwargs
                 self.cursor_instance = FakeCursor()
                 self.committed = False
+                self.commit_count = 0
                 self.rolled_back = False
                 self.closed = False
 
@@ -172,6 +173,7 @@ class ApiTraceLoggingTests(unittest.TestCase):
 
             def commit(self):
                 self.committed = True
+                self.commit_count += 1
 
             def rollback(self):
                 self.rolled_back = True
@@ -213,12 +215,17 @@ class ApiTraceLoggingTests(unittest.TestCase):
         self.assertTrue(connection.closed)
         self.assertFalse(connection.rolled_back)
         self.assertEqual(connection.kwargs["application_name"], "fraud-detector-api-migration")
+        self.assertNotIn("options", connection.kwargs)
         statements = connection.cursor_instance.executions
-        self.assertIn("CREATE TABLE IF NOT EXISTS transactions", statements[0][0])
-        self.assertIn("CREATE TABLE IF NOT EXISTS dashboard_access", statements[0][0])
-        self.assertIn("CREATE TABLE IF NOT EXISTS schema_migrations", statements[0][0])
-        self.assertIn("INSERT INTO schema_migrations", statements[1][0])
-        self.assertEqual(statements[1][1], (self.handler.MIGRATION_ID,))
+        self.assertEqual(statements[0], ("SET SESSION statement_timeout = %s", (25000,)))
+        self.assertEqual(statements[1], ("SET SESSION lock_timeout = %s", (10000,)))
+        self.assertEqual(statements[2], ("SET SESSION idle_in_transaction_session_timeout = %s", (25000,)))
+        self.assertIn("CREATE TABLE IF NOT EXISTS transactions", statements[3][0])
+        self.assertIn("CREATE TABLE IF NOT EXISTS dashboard_access", statements[3][0])
+        self.assertIn("CREATE TABLE IF NOT EXISTS schema_migrations", statements[3][0])
+        self.assertIn("INSERT INTO schema_migrations", statements[4][0])
+        self.assertEqual(statements[4][1], (self.handler.MIGRATION_ID,))
+        self.assertEqual(connection.commit_count, 2)
 
     def test_http_body_action_does_not_trigger_migration(self):
         def fail_migration():
