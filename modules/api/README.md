@@ -6,8 +6,8 @@ Provisions the dashboard API: a Lambda function running inside the VPC (to reach
 
 - `aws_cloudwatch_log_group.api_lambda` — `/aws/lambda/<project>-api`. 30-day retention by default.
 - `aws_cloudwatch_log_group.api_gw` — `/aws/apigateway/<project>-api`. 30-day retention by default.
-- `aws_security_group.api_lambda` — `<project>-api-lambda-sg`. No ingress; egress to the VPC endpoint SG on tcp/443 (Logs). The egress rule to RDS Proxy (tcp/5432) is created in the root composition to avoid circular module dependencies.
-- `aws_lambda_function.api` — `<project>-api`. Python 3.12, 256 MiB, configurable timeout (30 s by default), deployed in VPC private subnets. Receives `DB_*`, `SUMMARY_SNS_TOPIC_ARN`, and `USER_BEHAVIOR_TABLE_NAME` env vars and uses the psycopg2 Lambda layer to query RDS.
+- `aws_security_group.api_lambda` — `<project>-api-lambda-sg`. No ingress; egress to the VPC endpoint SG on tcp/443 (Logs, Secrets Manager, SNS). The egress rule to RDS Proxy (tcp/5432) is created in the root composition to avoid circular module dependencies.
+- `aws_lambda_function.api` — `<project>-api`. Python 3.12, 256 MiB, configurable timeout (30 s by default), deployed in VPC private subnets. Receives `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_CREDENTIALS_SECRET_ARN`, `SUMMARY_SNS_TOPIC_ARN`, and `USER_BEHAVIOR_TABLE_NAME` env vars. It fetches PostgreSQL username/password from Secrets Manager at cold start and uses the psycopg2 Lambda layer to query RDS.
 - `aws_apigatewayv2_api.main` — `<project>-api`. HTTP API (not REST API — simpler, cheaper). CORS configured for dashboard read/admin methods from any origin.
 - `aws_apigatewayv2_stage.default` — `$default` stage with `auto_deploy = true`.
 - `aws_apigatewayv2_integration.lambda` — `AWS_PROXY` integration, payload format version `2.0`.
@@ -33,8 +33,7 @@ Provisions the dashboard API: a Lambda function running inside the VPC (to reach
 | `db_host`                   | `string`       | n/a     | RDS Proxy endpoint hostname (`DB_HOST` env var).                              |
 | `db_port`                   | `number`       | `5432`  | RDS port (`DB_PORT` env var).                                                 |
 | `db_name`                   | `string`       | `"fraud_results"` | Database name (`DB_NAME` env var).                                  |
-| `db_username`               | `string`       | `"fraud_admin"` | Master username (`DB_USER` env var).                                    |
-| `db_password`               | `string`       | n/a     | Master password. `sensitive = true`. Passed as `DB_PASSWORD` env var.         |
+| `db_credentials_secret_arn` | `string`       | n/a     | Secrets Manager ARN containing PostgreSQL `username` and `password`.          |
 | `sns_topic_arn`             | `string`       | n/a     | Summary SNS topic ARN used to create dashboard email subscriptions.           |
 | `user_behavior_table_name`  | `string`       | n/a     | DynamoDB user-behavior table used by `GET /users/{id}/behavior`.              |
 | `jwt_issuer`                | `string`       | n/a     | Cognito issuer URL used by the JWT authorizer.                                 |
@@ -68,8 +67,7 @@ module "api" {
   db_host                    = module.data_store.proxy_endpoint
   db_port                    = module.data_store.db_port
   db_name                    = module.data_store.db_name
-  db_username                = module.data_store.db_username
-  db_password                = random_password.db.result
+  db_credentials_secret_arn  = module.data_store.db_credentials_secret_arn
   sns_topic_arn              = module.notification.topic_arn
   user_behavior_table_name   = module.data_store.table_name
   jwt_issuer                 = module.auth.issuer

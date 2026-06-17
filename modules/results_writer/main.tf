@@ -123,7 +123,7 @@ resource "aws_security_group" "writer_lambda" {
 
 resource "aws_vpc_security_group_egress_rule" "writer_to_endpoints" {
   security_group_id            = aws_security_group.writer_lambda.id
-  description                  = "HTTPS hacia los Interface VPC Endpoints (Logs, SQS, SNS)"
+  description                  = "HTTPS hacia los Interface VPC Endpoints (Logs, Secrets Manager, SQS, SNS)"
   referenced_security_group_id = var.endpoint_security_group_id
   ip_protocol                  = "tcp"
   from_port                    = 443
@@ -159,11 +159,10 @@ resource "aws_lambda_function" "writer" {
 
   environment {
     variables = {
-      DB_HOST     = var.db_host
-      DB_PORT     = tostring(var.db_port)
-      DB_NAME     = var.db_name
-      DB_USER     = var.db_username
-      DB_PASSWORD = var.db_password
+      DB_HOST                   = var.db_host
+      DB_PORT                   = tostring(var.db_port)
+      DB_NAME                   = var.db_name
+      DB_CREDENTIALS_SECRET_ARN = var.db_credentials_secret_arn
     }
   }
 

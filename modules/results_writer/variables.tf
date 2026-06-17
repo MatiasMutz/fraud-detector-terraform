@@ -61,16 +61,14 @@ variable "db_name" {
   default     = "fraud_results"
 }
 
-variable "db_username" {
-  description = "Usuario master de la base de datos (DB_USER en la Lambda)."
+variable "db_credentials_secret_arn" {
+  description = "ARN del secret de Secrets Manager con username/password de PostgreSQL."
   type        = string
-  default     = "fraud_admin"
-}
 
-variable "db_password" {
-  description = "Contraseña del usuario master de la base de datos."
-  type        = string
-  sensitive   = true
+  validation {
+    condition     = can(regex("^arn:aws:secretsmanager:[a-z0-9-]+:\\d{12}:secret:.+$", var.db_credentials_secret_arn))
+    error_message = "db_credentials_secret_arn debe ser un ARN valido de Secrets Manager."
+  }
 }
 
 variable "package_file" {
