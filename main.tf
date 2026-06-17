@@ -88,8 +88,7 @@ module "results_writer" {
   db_host                     = module.data_store.proxy_endpoint
   db_port                     = module.data_store.db_port
   db_name                     = module.data_store.db_name
-  db_username                 = module.data_store.db_username
-  db_password                 = random_password.db.result
+  db_credentials_secret_arn   = module.data_store.db_credentials_secret_arn
   package_file                = "${path.root}/app/results_writer/build/results-writer.zip"
   sqs_batch_size              = var.results_writer_batch_size
   sqs_batching_window_seconds = var.results_writer_batching_window_seconds
@@ -119,8 +118,7 @@ module "api" {
   db_host                    = module.data_store.proxy_endpoint
   db_port                    = module.data_store.db_port
   db_name                    = module.data_store.db_name
-  db_username                = module.data_store.db_username
-  db_password                = random_password.db.result
+  db_credentials_secret_arn  = module.data_store.db_credentials_secret_arn
   sns_topic_arn              = module.notification.topic_arn
   user_behavior_table_name   = module.data_store.table_name
   jwt_issuer                 = module.auth.issuer

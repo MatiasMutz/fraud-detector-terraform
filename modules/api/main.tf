@@ -52,7 +52,7 @@ resource "aws_security_group" "api_lambda" {
 
 resource "aws_vpc_security_group_egress_rule" "api_to_endpoints" {
   security_group_id            = aws_security_group.api_lambda.id
-  description                  = "HTTPS hacia los Interface VPC Endpoints (Logs, SNS)"
+  description                  = "HTTPS hacia los Interface VPC Endpoints (Logs, Secrets Manager, SNS)"
   referenced_security_group_id = var.endpoint_security_group_id
   ip_protocol                  = "tcp"
   from_port                    = 443
@@ -104,14 +104,13 @@ resource "aws_lambda_function" "api" {
 
   environment {
     variables = {
-      DB_HOST                  = var.db_host
-      DB_PORT                  = tostring(var.db_port)
-      DB_NAME                  = var.db_name
-      DB_USER                  = var.db_username
-      DB_PASSWORD              = var.db_password
-      SUMMARY_SNS_TOPIC_ARN    = var.sns_topic_arn
-      USER_BEHAVIOR_TABLE_NAME = var.user_behavior_table_name
-      AUTH_LOCAL_BYPASS        = "false"
+      DB_HOST                   = var.db_host
+      DB_PORT                   = tostring(var.db_port)
+      DB_NAME                   = var.db_name
+      DB_CREDENTIALS_SECRET_ARN = var.db_credentials_secret_arn
+      SUMMARY_SNS_TOPIC_ARN     = var.sns_topic_arn
+      USER_BEHAVIOR_TABLE_NAME  = var.user_behavior_table_name
+      AUTH_LOCAL_BYPASS         = "false"
     }
   }
 

@@ -10,7 +10,7 @@ ARG COGNITO_ISSUER=
 
 WORKDIR /site
 
-COPY dashboard/index.html dashboard/app.js ./
+COPY dashboard/index.html dashboard/app.js dashboard/favicon.ico ./
 
 RUN printf '%s\n' \
     '// Dashboard runtime config - generated during the dashboard build.' \
@@ -36,5 +36,6 @@ FROM nginx:1.27-alpine AS runtime
 COPY --from=export /index.html /usr/share/nginx/html/index.html
 COPY --from=export /app.js /usr/share/nginx/html/app.js
 COPY --from=export /config.js /usr/share/nginx/html/config.js
+COPY --from=export /favicon.ico /usr/share/nginx/html/favicon.ico
 
 EXPOSE 80

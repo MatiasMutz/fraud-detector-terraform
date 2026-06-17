@@ -81,7 +81,7 @@ validate: $(PSYCOPG2_ZIP) build-results-writer
 			  -var="endpoint_security_group_id=sg-123" \
 			  -var="psycopg2_layer_arn=arn:aws:lambda:us-east-1:123456789012:layer:psycopg2:1" \
 			  -var="db_host=localhost" \
-			  -var="db_password=secret" \
+			  -var="db_credentials_secret_arn=arn:aws:secretsmanager:us-east-1:123456789012:secret:test-db" \
 			  -var="sns_topic_arn=arn:aws:sns:us-east-1:123456789012:topic" \
 			  -var="user_behavior_table_name=test-user-behavior" \
 			  -var="jwt_issuer=https://cognito-idp.us-east-1.amazonaws.com/us-east-1_example" \

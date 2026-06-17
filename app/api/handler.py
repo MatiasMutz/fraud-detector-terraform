@@ -4,7 +4,7 @@ import logging
 import os
 import re
 import uuid
-from time import perf_counter
+from time import perf_counter, sleep
 from urllib.parse import unquote
 
 import boto3
@@ -26,6 +26,7 @@ HEADERS = {
 
 _conn = None
 _dynamodb_client = None
+_db_credentials = None
 _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _SORTABLE_TX = {
     "transaction_id": "transaction_id",
@@ -51,6 +52,11 @@ _SORTABLE_USERS = {
 }
 
 MIGRATION_ID = "2026_06_15_001_dashboard_api_schema"
+
+
+class DBSecretConfigError(RuntimeError):
+    pass
+
 
 SCHEMA_SQL = """
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -173,6 +179,22 @@ def _db_lock_timeout_ms():
     return _env_int("API_DB_LOCK_TIMEOUT_MS", 2_000, minimum=500, maximum=10_000)
 
 
+def _db_connect_max_attempts():
+    return _env_int("API_DB_CONNECT_MAX_ATTEMPTS", 3, minimum=1, maximum=5)
+
+
+def _db_operation_max_attempts():
+    return _env_int("API_DB_OPERATION_MAX_ATTEMPTS", 2, minimum=1, maximum=3)
+
+
+def _db_retry_base_delay_ms():
+    return _env_int("API_DB_RETRY_BASE_DELAY_MS", 100, minimum=0, maximum=1_000)
+
+
+def _db_retry_max_delay_ms():
+    return _env_int("API_DB_RETRY_MAX_DELAY_MS", 1_000, minimum=0, maximum=5_000)
+
+
 def _migration_db_statement_timeout_ms():
     return _env_int("MIGRATION_DB_STATEMENT_TIMEOUT_MS", 25_000, minimum=5_000, maximum=25_000)
 
@@ -213,6 +235,59 @@ def _configure_db_session(conn, settings):
     conn.commit()
 
 
+def _db_error_classes():
+    candidates = [
+        getattr(psycopg2, "OperationalError", None),
+        getattr(psycopg2, "InterfaceError", None),
+        getattr(psycopg2, "DatabaseError", None),
+        getattr(psycopg2, "Error", None),
+    ]
+    classes = []
+    for candidate in candidates:
+        if isinstance(candidate, type) and candidate not in classes:
+            classes.append(candidate)
+    return tuple(classes)
+
+
+def _db_retryable_error_classes():
+    candidates = [
+        getattr(psycopg2, "OperationalError", None),
+        getattr(psycopg2, "InterfaceError", None),
+    ]
+    classes = []
+    for candidate in candidates:
+        if isinstance(candidate, type) and candidate not in classes:
+            classes.append(candidate)
+    return tuple(classes)
+
+
+def _is_retryable_db_error(exc):
+    retryable = _db_retryable_error_classes()
+    return bool(retryable) and isinstance(exc, retryable)
+
+
+def _db_retry_delay_seconds(failed_attempt):
+    base_ms = _db_retry_base_delay_ms()
+    max_ms = _db_retry_max_delay_ms()
+    delay_ms = min(max_ms, base_ms * (2 ** max(0, failed_attempt - 1)))
+    return delay_ms / 1000
+
+
+def _sleep_before_db_retry(failed_attempt, *, max_attempts, db_action, exc):
+    delay_seconds = _db_retry_delay_seconds(failed_attempt)
+    _safe_log(
+        "db_retry_scheduled",
+        level="WARN",
+        db_action=db_action,
+        attempt=failed_attempt + 1,
+        max_attempts=max_attempts,
+        delay_ms=round(delay_seconds * 1000),
+        error_class=_error_class(exc),
+    )
+    if delay_seconds > 0:
+        sleep(delay_seconds)
+
+
 def _aws_client_config():
     return Config(
         connect_timeout=_aws_connect_timeout_seconds(),
@@ -229,44 +304,47 @@ def _aws_client(service_name):
     )
 
 
-def _get_conn():
-    global _conn
-    if _conn is None or _conn.closed:
-        conn = psycopg2.connect(
-            host=os.environ["DB_HOST"],
-            port=int(os.environ["DB_PORT"]),
-            dbname=os.environ["DB_NAME"],
-            user=os.environ["DB_USER"],
-            password=os.environ["DB_PASSWORD"],
-            sslmode="require",
-            connect_timeout=_db_connect_timeout_seconds(),
-            application_name="fraud-detector-api",
-        )
-        try:
-            _configure_db_session(conn, _db_session_settings())
-        except Exception:
-            try:
-                conn.close()
-            except Exception:
-                pass
-            raise
-        _conn = conn
-    return _conn
+def _load_db_credentials():
+    global _db_credentials
+    if _db_credentials is not None:
+        return _db_credentials
+
+    secret_arn = os.getenv("DB_CREDENTIALS_SECRET_ARN")
+    if not secret_arn:
+        raise DBSecretConfigError("DB_CREDENTIALS_SECRET_ARN is not set")
+
+    response = _aws_client("secretsmanager").get_secret_value(SecretId=secret_arn)
+    raw_secret = response.get("SecretString")
+    if not raw_secret:
+        raise DBSecretConfigError("DB credentials secret is missing SecretString")
+
+    try:
+        payload = json.loads(raw_secret)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise DBSecretConfigError("DB credentials secret contains invalid JSON") from exc
+    username = payload.get("username")
+    password = payload.get("password")
+    if not username or not password:
+        raise DBSecretConfigError("DB credentials secret must contain username and password")
+
+    _db_credentials = {"username": username, "password": password}
+    return _db_credentials
 
 
-def _get_migration_conn():
+def _connect_db(application_name, settings):
+    credentials = _load_db_credentials()
     conn = psycopg2.connect(
         host=os.environ["DB_HOST"],
         port=int(os.environ["DB_PORT"]),
         dbname=os.environ["DB_NAME"],
-        user=os.environ["DB_USER"],
-        password=os.environ["DB_PASSWORD"],
+        user=credentials["username"],
+        password=credentials["password"],
         sslmode="require",
         connect_timeout=_db_connect_timeout_seconds(),
-        application_name="fraud-detector-api-migration",
+        application_name=application_name,
     )
     try:
-        _configure_db_session(conn, _migration_db_session_settings())
+        _configure_db_session(conn, settings)
     except Exception:
         try:
             conn.close()
@@ -274,6 +352,47 @@ def _get_migration_conn():
             pass
         raise
     return conn
+
+
+def _connect_db_with_retry(application_name, settings):
+    max_attempts = _db_connect_max_attempts()
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return _connect_db(application_name, settings)
+        except Exception as exc:
+            if not _is_retryable_db_error(exc) or attempt >= max_attempts:
+                raise
+            _sleep_before_db_retry(
+                attempt,
+                max_attempts=max_attempts,
+                db_action="connect",
+                exc=exc,
+            )
+    raise RuntimeError("unreachable database connection retry state")
+
+
+def _ping_conn(conn):
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1")
+    conn.commit()
+
+
+def _get_conn():
+    global _conn
+    if _conn is not None and not _conn.closed:
+        try:
+            _ping_conn(_conn)
+            return _conn
+        except _db_error_classes() as exc:
+            _safe_log("db_cached_connection_unusable", level="WARN", error_class=_error_class(exc))
+            _close_conn()
+
+    _conn = _connect_db_with_retry("fraud-detector-api", _db_session_settings())
+    return _conn
+
+
+def _get_migration_conn():
+    return _connect_db_with_retry("fraud-detector-api-migration", _migration_db_session_settings())
 
 
 def _close_conn():
@@ -1610,6 +1729,30 @@ def _dispatch_request(event, path, query, path_params, method):
     return _err(404, "NOT_FOUND", "Route not found")
 
 
+def _should_retry_db_request(method, route, *, is_bootstrap=False, is_migration=False):
+    if is_bootstrap or is_migration:
+        return False
+    return method in {"GET", "OPTIONS"} or route == "/health"
+
+
+def _run_with_db_retry(operation, *, db_action):
+    max_attempts = _db_operation_max_attempts()
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return operation()
+        except Exception as exc:
+            if not _is_retryable_db_error(exc) or attempt >= max_attempts:
+                raise
+            _close_conn()
+            _sleep_before_db_retry(
+                attempt,
+                max_attempts=max_attempts,
+                db_action=db_action,
+                exc=exc,
+            )
+    raise RuntimeError("unreachable database operation retry state")
+
+
 def handler(event, context):
     started = perf_counter()
     trace_id = _request_trace_id(event)
@@ -1637,18 +1780,23 @@ def handler(event, context):
     )
 
     try:
-        if is_migration:
-            response = _migrate_database_schema()
-        elif is_bootstrap:
-            response = _bootstrap_dashboard_admin(event)
+        def run_request():
+            if is_migration:
+                return _migrate_database_schema()
+            if is_bootstrap:
+                return _bootstrap_dashboard_admin(event)
+            return _dispatch_request(event, path, query, path_params, method)
+
+        if _should_retry_db_request(method, route, is_bootstrap=is_bootstrap, is_migration=is_migration):
+            response = _run_with_db_retry(run_request, db_action=route)
         else:
-            response = _dispatch_request(event, path, query, path_params, method)
-    except (psycopg2.OperationalError, psycopg2.DatabaseError) as exc:
+            response = run_request()
+    except _db_error_classes() as exc:
         error_class = _error_class(exc)
         _close_conn()
         logger.exception("api_database_error")
         response = _err(503, "SERVICE_UNAVAILABLE", "Database temporarily unavailable")
-    except (BotoCoreError, ClientError) as exc:
+    except (BotoCoreError, ClientError, DBSecretConfigError) as exc:
         error_class = _error_class(exc)
         logger.exception("api_aws_client_error")
         response = _err(502, "UPSTREAM_UNAVAILABLE", "Upstream AWS service temporarily unavailable")

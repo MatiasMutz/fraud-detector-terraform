@@ -110,11 +110,8 @@ Los workflows se lanzan manualmente en la pestaña **Actions** del repositorio. 
 
 Tras un **Deploy** exitoso, usar la URL HTTPS del job summary (`dashboard_url`).
 
-Al abrir `dashboard_url`, el sitio redirige a la pantalla de inicio de sesión:
-
-![Pantalla de login del dashboard](img/login_page.png)
-
-Iniciar sesión con el email de `BOOTSTRAP_EMAIL` en la UI de cognito:
+Al abrir `dashboard_url`, el sitio redirige directamente al Hosted UI de Cognito.
+Iniciar sesión con el email de `BOOTSTRAP_EMAIL`:
 
 ![Cognito Hosted UI: sign in](img/cognito_sign_in.png)
 

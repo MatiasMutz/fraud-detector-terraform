@@ -9,7 +9,9 @@ import (
 )
 
 func main() {
-	dbCfg, err := writer.LoadDBConfigFromEnv()
+	ctx := context.Background()
+
+	dbCfg, err := writer.LoadDBConfigFromEnv(ctx)
 	if err != nil {
 		log.Fatalf("load db config: %v", err)
 	}
@@ -25,7 +27,7 @@ func main() {
 		log.Fatalf("init runtime: %v", err)
 	}
 
-	if err := runtime.Serve(context.Background()); err != nil {
+	if err := runtime.Serve(ctx); err != nil {
 		log.Fatalf("runtime stopped: %v", err)
 	}
 }
