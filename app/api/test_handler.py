@@ -42,6 +42,9 @@ class ApiTraceLoggingTests(unittest.TestCase):
     def setUpClass(cls):
         cls.handler = load_handler()
 
+    def setUp(self):
+        self.handler._db_credentials = None
+
     def test_trace_id_header_is_reused(self):
         event = {"headers": {"X-Trace-Id": "11111111-1111-4111-8111-111111111111"}}
         self.assertEqual(self.handler._request_trace_id(event), "11111111-1111-4111-8111-111111111111")
@@ -117,6 +120,67 @@ class ApiTraceLoggingTests(unittest.TestCase):
         self.assertNotIn("amount", payload)
         self.assertNotIn("query", payload)
 
+    def test_load_db_credentials_fetches_secret_once(self):
+        class FakeSecretsManager:
+            def __init__(self):
+                self.calls = []
+
+            def get_secret_value(self, **kwargs):
+                self.calls.append(kwargs)
+                return {"SecretString": json.dumps({"username": "fraud_admin", "password": "secret"})}
+
+        client = FakeSecretsManager()
+        original_aws_client = self.handler._aws_client
+        original_secret_arn = self.handler.os.environ.get("DB_CREDENTIALS_SECRET_ARN")
+        self.handler._aws_client = lambda service_name: client
+        self.handler.os.environ["DB_CREDENTIALS_SECRET_ARN"] = (
+            "arn:aws:secretsmanager:us-east-1:123456789012:secret:db"
+        )
+        try:
+            credentials = self.handler._load_db_credentials()
+            cached = self.handler._load_db_credentials()
+        finally:
+            self.handler._aws_client = original_aws_client
+            if original_secret_arn is None:
+                self.handler.os.environ.pop("DB_CREDENTIALS_SECRET_ARN", None)
+            else:
+                self.handler.os.environ["DB_CREDENTIALS_SECRET_ARN"] = original_secret_arn
+
+        self.assertEqual(credentials, {"username": "fraud_admin", "password": "secret"})
+        self.assertIs(cached, credentials)
+        self.assertEqual(client.calls, [{"SecretId": "arn:aws:secretsmanager:us-east-1:123456789012:secret:db"}])
+
+    def test_load_db_credentials_requires_secret_arn(self):
+        original_secret_arn = self.handler.os.environ.get("DB_CREDENTIALS_SECRET_ARN")
+        self.handler.os.environ.pop("DB_CREDENTIALS_SECRET_ARN", None)
+        try:
+            with self.assertRaises(self.handler.DBSecretConfigError):
+                self.handler._load_db_credentials()
+        finally:
+            if original_secret_arn is not None:
+                self.handler.os.environ["DB_CREDENTIALS_SECRET_ARN"] = original_secret_arn
+
+    def test_load_db_credentials_rejects_incomplete_secret(self):
+        class FakeSecretsManager:
+            def get_secret_value(self, **kwargs):
+                return {"SecretString": json.dumps({"username": "fraud_admin"})}
+
+        original_aws_client = self.handler._aws_client
+        original_secret_arn = self.handler.os.environ.get("DB_CREDENTIALS_SECRET_ARN")
+        self.handler._aws_client = lambda service_name: FakeSecretsManager()
+        self.handler.os.environ["DB_CREDENTIALS_SECRET_ARN"] = (
+            "arn:aws:secretsmanager:us-east-1:123456789012:secret:db"
+        )
+        try:
+            with self.assertRaises(self.handler.DBSecretConfigError):
+                self.handler._load_db_credentials()
+        finally:
+            self.handler._aws_client = original_aws_client
+            if original_secret_arn is None:
+                self.handler.os.environ.pop("DB_CREDENTIALS_SECRET_ARN", None)
+            else:
+                self.handler.os.environ["DB_CREDENTIALS_SECRET_ARN"] = original_secret_arn
+
     def test_handler_logs_request_start_before_dispatch(self):
         def fake_dispatch(event, path, query, path_params, method):
             return self.handler._ok({"status": "ok"})
@@ -189,19 +253,21 @@ class ApiTraceLoggingTests(unittest.TestCase):
             return connection
 
         original_connect = getattr(self.handler.psycopg2, "connect", None)
+        original_load_db_credentials = self.handler._load_db_credentials
         self.handler.psycopg2.connect = fake_connect
+        self.handler._load_db_credentials = lambda: {"username": "fraud_admin", "password": "secret"}
         self.handler.os.environ.update(
             {
                 "DB_HOST": "db.example",
                 "DB_PORT": "5432",
                 "DB_NAME": "fraud_results",
-                "DB_USER": "fraud_admin",
-                "DB_PASSWORD": "secret",
+                "DB_CREDENTIALS_SECRET_ARN": "arn:aws:secretsmanager:us-east-1:123456789012:secret:db",
             }
         )
         try:
             response = self.handler.handler({"action": "migrate_database_schema"}, None)
         finally:
+            self.handler._load_db_credentials = original_load_db_credentials
             if original_connect is None:
                 delattr(self.handler.psycopg2, "connect")
             else:

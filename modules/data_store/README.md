@@ -59,6 +59,7 @@ Provisions all persistent storage for the fraud-scoring system: a DynamoDB table
 | `db_port`               | RDS port (5432).                                                                                                      |
 | `db_name`               | Initial database name.                                                                                                |
 | `db_username`           | Master username.                                                                                                      |
+| `db_credentials_secret_arn` | Secrets Manager ARN containing PostgreSQL `username` and `password`; passed to Lambda consumers.                   |
 | `db_endpoint`           | Full endpoint in `host:port` format.                                                                                  |
 | `rds_security_group_id`     | RDS security group ID. Exposed so the root composition can add rules without circular module dependencies.          |
 | `db_instance_id`            | RDS instance identifier.                                                                                             |
@@ -95,7 +96,7 @@ resource "aws_vpc_security_group_ingress_rule" "proxy_from_writer" {
 ## Notes for AWS Academy
 
 - **DynamoDB**: AWS Academy does not allow customer-managed KMS keys. The table uses the AWS-owned default key (Checkov `CKV_AWS_119` skipped).
-- **RDS**: `auto_minor_version_upgrade`, `copy_tags_to_snapshot`, and `iam_database_authentication_enabled` are enabled. Applications still authenticate via RDS Proxy and Secrets Manager (`iam_auth = DISABLED` on the proxy). Checkov `CKV_AWS_157`, `CKV_AWS_133`, `CKV_AWS_118`, `CKV_AWS_293`, `CKV_AWS_129`, `CKV_AWS_354` remain skipped — lab cost or Academy restriction trade-offs documented inline.
+- **RDS**: `auto_minor_version_upgrade`, `copy_tags_to_snapshot`, and `iam_database_authentication_enabled` are enabled. Applications connect through RDS Proxy and fetch username/password from the same Secrets Manager secret used by the proxy (`iam_auth = DISABLED` on the proxy). Checkov `CKV_AWS_157`, `CKV_AWS_133`, `CKV_AWS_118`, `CKV_AWS_293`, `CKV_AWS_129`, `CKV_AWS_354` remain skipped — lab cost or Academy restriction trade-offs documented inline.
 - **Audit S3**: lifecycle includes `abort_incomplete_multipart_upload` after 7 days.
-- The RDS password is generated with `random_password` in the root composition and passed as a sensitive variable. Retrieve it with `terraform output -raw db_password`.
+- The RDS password is generated with `random_password` in the root composition and passed as a sensitive variable. Lambda consumers use `db_credentials_secret_arn`; `terraform output -raw db_password` is only a break-glass retrieval path.
 - The TP requires only one DynamoDB table — there are no GSIs or LSIs by design.

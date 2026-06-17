@@ -38,6 +38,11 @@ output "db_username" {
   value       = aws_db_instance.results.username
 }
 
+output "db_credentials_secret_arn" {
+  description = "ARN del secret de Secrets Manager que contiene username/password para PostgreSQL."
+  value       = aws_secretsmanager_secret.db_credentials.arn
+}
+
 output "db_endpoint" {
   description = "Endpoint completo en formato host:port."
   value       = aws_db_instance.results.endpoint

@@ -14,7 +14,7 @@ The writer batches the full SQS invocation into a single database transaction an
 - `aws_sqs_queue_policy.results` - allows `principal_arn` to send and consume, and denies insecure transport.
 - `aws_cloudwatch_log_group.writer` - `/aws/lambda/<project>-results-writer`. 30-day retention by default.
 - `aws_security_group.writer_lambda` - `<project>-writer-lambda-sg`. No ingress; egress to the VPC endpoint SG on tcp/443. The egress rule to the RDS Proxy SG is created in the root composition to avoid circular module dependencies.
-- `aws_lambda_function.writer` - `<project>-results-writer`. `provided.al2023`, `bootstrap` handler, x86_64, 1024 MiB, 60 s timeout, deployed in private subnets. Receives `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` and connects to PostgreSQL with the Go `lib/pq` driver.
+- `aws_lambda_function.writer` - `<project>-results-writer`. `provided.al2023`, `bootstrap` handler, x86_64, 1024 MiB, 60 s timeout, deployed in private subnets. Receives `DB_HOST`, `DB_PORT`, `DB_NAME`, and `DB_CREDENTIALS_SECRET_ARN`, fetches PostgreSQL username/password from Secrets Manager at cold start, and connects with the Go `lib/pq` driver.
 - `aws_lambda_event_source_mapping.sqs_results` - triggers the Lambda from the results SQS queue. Batch size and batching window are module variables and default to large values.
 
 ## Inputs
@@ -30,8 +30,7 @@ The writer batches the full SQS invocation into a single database transaction an
 | `db_host` | `string` | n/a | RDS Proxy endpoint hostname (`DB_HOST`). |
 | `db_port` | `number` | `5432` | RDS port (`DB_PORT`). |
 | `db_name` | `string` | `"fraud_results"` | Database name (`DB_NAME`). |
-| `db_username` | `string` | `"fraud_admin"` | Database user (`DB_USER`). |
-| `db_password` | `string` | n/a | Database password (`DB_PASSWORD`), marked sensitive. |
+| `db_credentials_secret_arn` | `string` | n/a | Secrets Manager ARN containing PostgreSQL `username` and `password`. |
 | `package_file` | `string` | n/a | Local zip package path built from `app/results_writer`. |
 | `sqs_batch_size` | `number` | `5000` | Maximum records per SQS batch for the writer Lambda. Standard SQS queues allow up to 10,000. |
 | `sqs_batching_window_seconds` | `number` | `5` | Maximum batching window for the event source mapping. Must be at least 1 when `sqs_batch_size > 10`. |
@@ -74,8 +73,7 @@ module "results_writer" {
   db_host                    = module.data_store.proxy_endpoint
   db_port                    = module.data_store.db_port
   db_name                    = module.data_store.db_name
-  db_username                = module.data_store.db_username
-  db_password                = random_password.db.result
+  db_credentials_secret_arn  = module.data_store.db_credentials_secret_arn
   package_file               = "${path.root}/app/results_writer/build/results-writer.zip"
   sqs_batch_size              = 5000
   sqs_batching_window_seconds = 5

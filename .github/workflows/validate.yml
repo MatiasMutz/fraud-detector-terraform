@@ -25,6 +25,13 @@ jobs:
           go-version-file: app/results_writer/go.mod
           cache-dependency-path: app/results_writer/go.sum
 
+      - name: Test API Lambda
+        run: python3 -m unittest app/api/test_handler.py
+
+      - name: Test results-writer Lambda
+        working-directory: app/results_writer
+        run: go test ./...
+
       - name: Build Lambda layers
         run: make build-layers
 

@@ -26,6 +26,7 @@ HEADERS = {
 
 _conn = None
 _dynamodb_client = None
+_db_credentials = None
 _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _SORTABLE_TX = {
     "transaction_id": "transaction_id",
@@ -51,6 +52,11 @@ _SORTABLE_USERS = {
 }
 
 MIGRATION_ID = "2026_06_15_001_dashboard_api_schema"
+
+
+class DBSecretConfigError(RuntimeError):
+    pass
+
 
 SCHEMA_SQL = """
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -229,15 +235,43 @@ def _aws_client(service_name):
     )
 
 
+def _load_db_credentials():
+    global _db_credentials
+    if _db_credentials is not None:
+        return _db_credentials
+
+    secret_arn = os.getenv("DB_CREDENTIALS_SECRET_ARN")
+    if not secret_arn:
+        raise DBSecretConfigError("DB_CREDENTIALS_SECRET_ARN is not set")
+
+    response = _aws_client("secretsmanager").get_secret_value(SecretId=secret_arn)
+    raw_secret = response.get("SecretString")
+    if not raw_secret:
+        raise DBSecretConfigError("DB credentials secret is missing SecretString")
+
+    try:
+        payload = json.loads(raw_secret)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise DBSecretConfigError("DB credentials secret contains invalid JSON") from exc
+    username = payload.get("username")
+    password = payload.get("password")
+    if not username or not password:
+        raise DBSecretConfigError("DB credentials secret must contain username and password")
+
+    _db_credentials = {"username": username, "password": password}
+    return _db_credentials
+
+
 def _get_conn():
     global _conn
     if _conn is None or _conn.closed:
+        credentials = _load_db_credentials()
         conn = psycopg2.connect(
             host=os.environ["DB_HOST"],
             port=int(os.environ["DB_PORT"]),
             dbname=os.environ["DB_NAME"],
-            user=os.environ["DB_USER"],
-            password=os.environ["DB_PASSWORD"],
+            user=credentials["username"],
+            password=credentials["password"],
             sslmode="require",
             connect_timeout=_db_connect_timeout_seconds(),
             application_name="fraud-detector-api",
@@ -255,12 +289,13 @@ def _get_conn():
 
 
 def _get_migration_conn():
+    credentials = _load_db_credentials()
     conn = psycopg2.connect(
         host=os.environ["DB_HOST"],
         port=int(os.environ["DB_PORT"]),
         dbname=os.environ["DB_NAME"],
-        user=os.environ["DB_USER"],
-        password=os.environ["DB_PASSWORD"],
+        user=credentials["username"],
+        password=credentials["password"],
         sslmode="require",
         connect_timeout=_db_connect_timeout_seconds(),
         application_name="fraud-detector-api-migration",
@@ -1648,7 +1683,7 @@ def handler(event, context):
         _close_conn()
         logger.exception("api_database_error")
         response = _err(503, "SERVICE_UNAVAILABLE", "Database temporarily unavailable")
-    except (BotoCoreError, ClientError) as exc:
+    except (BotoCoreError, ClientError, DBSecretConfigError) as exc:
         error_class = _error_class(exc)
         logger.exception("api_aws_client_error")
         response = _err(502, "UPSTREAM_UNAVAILABLE", "Upstream AWS service temporarily unavailable")
