@@ -10,8 +10,10 @@ from pathlib import Path
 def load_handler():
     fake_psycopg2 = types.ModuleType("psycopg2")
     fake_psycopg2_extras = types.ModuleType("psycopg2.extras")
-    fake_psycopg2.OperationalError = type("OperationalError", (Exception,), {})
-    fake_psycopg2.DatabaseError = type("DatabaseError", (Exception,), {})
+    fake_psycopg2.Error = type("Error", (Exception,), {})
+    fake_psycopg2.DatabaseError = type("DatabaseError", (fake_psycopg2.Error,), {})
+    fake_psycopg2.OperationalError = type("OperationalError", (fake_psycopg2.DatabaseError,), {})
+    fake_psycopg2.InterfaceError = type("InterfaceError", (fake_psycopg2.Error,), {})
     fake_psycopg2_extras.RealDictCursor = object
     fake_psycopg2.extras = fake_psycopg2_extras
     fake_boto3 = types.ModuleType("boto3")
@@ -44,6 +46,7 @@ class ApiTraceLoggingTests(unittest.TestCase):
 
     def setUp(self):
         self.handler._db_credentials = None
+        self.handler._conn = None
 
     def test_trace_id_header_is_reused(self):
         event = {"headers": {"X-Trace-Id": "11111111-1111-4111-8111-111111111111"}}
@@ -180,6 +183,218 @@ class ApiTraceLoggingTests(unittest.TestCase):
                 self.handler.os.environ.pop("DB_CREDENTIALS_SECRET_ARN", None)
             else:
                 self.handler.os.environ["DB_CREDENTIALS_SECRET_ARN"] = original_secret_arn
+
+    def test_get_conn_replaces_stale_cached_connection(self):
+        operational_error = self.handler.psycopg2.OperationalError
+
+        class FakeCursor:
+            def __init__(self, conn):
+                self.conn = conn
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def execute(self, statement, params=None):
+                self.conn.executions.append((statement, params))
+                if self.conn.fail_ping and statement == "SELECT 1":
+                    raise operational_error("SSL connection has been closed unexpectedly")
+
+        class FakeConnection:
+            def __init__(self, *, fail_ping=False):
+                self.fail_ping = fail_ping
+                self.closed = False
+                self.executions = []
+                self.commit_count = 0
+
+            def cursor(self):
+                return FakeCursor(self)
+
+            def commit(self):
+                self.commit_count += 1
+
+            def close(self):
+                self.closed = True
+
+        stale = FakeConnection(fail_ping=True)
+        fresh_connections = []
+
+        def fake_connect(**kwargs):
+            conn = FakeConnection()
+            conn.kwargs = kwargs
+            fresh_connections.append(conn)
+            return conn
+
+        original_connect = getattr(self.handler.psycopg2, "connect", None)
+        original_load_db_credentials = self.handler._load_db_credentials
+        self.handler._conn = stale
+        self.handler.psycopg2.connect = fake_connect
+        self.handler._load_db_credentials = lambda: {"username": "fraud_admin", "password": "secret"}
+        self.handler.os.environ.update(
+            {
+                "DB_HOST": "db.example",
+                "DB_PORT": "5432",
+                "DB_NAME": "fraud_results",
+            }
+        )
+        try:
+            conn = self.handler._get_conn()
+        finally:
+            self.handler._load_db_credentials = original_load_db_credentials
+            if original_connect is None:
+                delattr(self.handler.psycopg2, "connect")
+            else:
+                self.handler.psycopg2.connect = original_connect
+
+        self.assertTrue(stale.closed)
+        self.assertEqual(len(fresh_connections), 1)
+        self.assertIs(conn, fresh_connections[0])
+        self.assertIs(self.handler._conn, conn)
+        self.assertEqual(conn.kwargs["application_name"], "fraud-detector-api")
+        self.assertEqual(conn.executions[0], ("SET SESSION statement_timeout = %s", (10000,)))
+
+    def test_connect_db_retries_transient_connection_failure(self):
+        class FakeCursor:
+            def __init__(self, conn):
+                self.conn = conn
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def execute(self, statement, params=None):
+                self.conn.executions.append((statement, params))
+
+        class FakeConnection:
+            closed = False
+
+            def __init__(self):
+                self.executions = []
+
+            def cursor(self):
+                return FakeCursor(self)
+
+            def commit(self):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        calls = []
+
+        def fake_connect(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise self.handler.psycopg2.OperationalError("connection timed out")
+            return FakeConnection()
+
+        original_connect = getattr(self.handler.psycopg2, "connect", None)
+        original_load_db_credentials = self.handler._load_db_credentials
+        original_attempts = self.handler.os.environ.get("API_DB_CONNECT_MAX_ATTEMPTS")
+        original_delay = self.handler.os.environ.get("API_DB_RETRY_BASE_DELAY_MS")
+        self.handler.psycopg2.connect = fake_connect
+        self.handler._load_db_credentials = lambda: {"username": "fraud_admin", "password": "secret"}
+        self.handler.os.environ.update(
+            {
+                "DB_HOST": "db.example",
+                "DB_PORT": "5432",
+                "DB_NAME": "fraud_results",
+                "API_DB_CONNECT_MAX_ATTEMPTS": "2",
+                "API_DB_RETRY_BASE_DELAY_MS": "0",
+            }
+        )
+        try:
+            conn = self.handler._connect_db_with_retry("fraud-detector-api", self.handler._db_session_settings())
+        finally:
+            self.handler._load_db_credentials = original_load_db_credentials
+            if original_connect is None:
+                delattr(self.handler.psycopg2, "connect")
+            else:
+                self.handler.psycopg2.connect = original_connect
+            if original_attempts is None:
+                self.handler.os.environ.pop("API_DB_CONNECT_MAX_ATTEMPTS", None)
+            else:
+                self.handler.os.environ["API_DB_CONNECT_MAX_ATTEMPTS"] = original_attempts
+            if original_delay is None:
+                self.handler.os.environ.pop("API_DB_RETRY_BASE_DELAY_MS", None)
+            else:
+                self.handler.os.environ["API_DB_RETRY_BASE_DELAY_MS"] = original_delay
+
+        self.assertIsInstance(conn, FakeConnection)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1]["application_name"], "fraud-detector-api")
+
+    def test_handler_retries_get_after_retryable_db_error(self):
+        calls = []
+
+        def fake_dispatch(event, path, query, path_params, method):
+            calls.append((path, method))
+            if len(calls) == 1:
+                raise self.handler.psycopg2.InterfaceError("connection already closed")
+            return self.handler._ok({"status": "ok"})
+
+        event = {
+            "rawPath": "/dashboard/me",
+            "requestContext": {"requestId": "req-retry", "http": {"method": "GET"}},
+        }
+
+        original_dispatch = self.handler._dispatch_request
+        original_attempts = self.handler.os.environ.get("API_DB_OPERATION_MAX_ATTEMPTS")
+        original_delay = self.handler.os.environ.get("API_DB_RETRY_BASE_DELAY_MS")
+        self.handler._dispatch_request = fake_dispatch
+        self.handler.os.environ["API_DB_OPERATION_MAX_ATTEMPTS"] = "2"
+        self.handler.os.environ["API_DB_RETRY_BASE_DELAY_MS"] = "0"
+        try:
+            response = self.handler.handler(event, None)
+        finally:
+            self.handler._dispatch_request = original_dispatch
+            if original_attempts is None:
+                self.handler.os.environ.pop("API_DB_OPERATION_MAX_ATTEMPTS", None)
+            else:
+                self.handler.os.environ["API_DB_OPERATION_MAX_ATTEMPTS"] = original_attempts
+            if original_delay is None:
+                self.handler.os.environ.pop("API_DB_RETRY_BASE_DELAY_MS", None)
+            else:
+                self.handler.os.environ["API_DB_RETRY_BASE_DELAY_MS"] = original_delay
+
+        body = json.loads(response["body"])
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["data"]["status"], "ok")
+        self.assertEqual(calls, [("/dashboard/me", "GET"), ("/dashboard/me", "GET")])
+
+    def test_handler_does_not_retry_mutating_request_after_db_error(self):
+        calls = []
+
+        def fake_dispatch(event, path, query, path_params, method):
+            calls.append((path, method))
+            raise self.handler.psycopg2.InterfaceError("connection already closed")
+
+        event = {
+            "rawPath": "/dashboard/invites",
+            "requestContext": {"requestId": "req-post", "http": {"method": "POST"}},
+        }
+
+        original_dispatch = self.handler._dispatch_request
+        original_attempts = self.handler.os.environ.get("API_DB_OPERATION_MAX_ATTEMPTS")
+        self.handler._dispatch_request = fake_dispatch
+        self.handler.os.environ["API_DB_OPERATION_MAX_ATTEMPTS"] = "3"
+        try:
+            response = self.handler.handler(event, None)
+        finally:
+            self.handler._dispatch_request = original_dispatch
+            if original_attempts is None:
+                self.handler.os.environ.pop("API_DB_OPERATION_MAX_ATTEMPTS", None)
+            else:
+                self.handler.os.environ["API_DB_OPERATION_MAX_ATTEMPTS"] = original_attempts
+
+        body = json.loads(response["body"])
+        self.assertEqual(response["statusCode"], 503)
+        self.assertEqual(body["error"]["code"], "SERVICE_UNAVAILABLE")
+        self.assertEqual(calls, [("/dashboard/invites", "POST")])
 
     def test_handler_logs_request_start_before_dispatch(self):
         def fake_dispatch(event, path, query, path_params, method):

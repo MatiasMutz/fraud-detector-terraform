@@ -9,14 +9,14 @@ Provisions the S3 static website bucket used by the fraud dashboard. Terraform o
 - `aws_s3_bucket_website_configuration.dashboard` — static website hosting with `index.html`.
 - `aws_s3_bucket_public_access_block.dashboard` — public access block relaxed for the public website endpoint.
 - `aws_s3_bucket_policy.dashboard` — allows public `s3:GetObject` on website objects.
-- `aws_s3_object.index_html`, `aws_s3_object.app_js`, `aws_s3_object.config_js` — bootstrap dashboard objects. These stable filenames are published with `no-cache, no-store, must-revalidate` so browsers do not keep stale Cognito/API settings after a redeploy.
+- `aws_s3_object.index_html`, `aws_s3_object.app_js`, `aws_s3_object.favicon_ico`, `aws_s3_object.config_js` — bootstrap dashboard objects. These stable filenames are published with `no-cache, no-store, must-revalidate` so browsers do not keep stale Cognito/API settings after a redeploy. `favicon_ico` is sourced from `favicon.ico` alongside `index.html` (same directory as `index_html_path`).
 
 ## Inputs
 
 | Name      | Type          | Default | Description                                      |
 | --------- | ------------- | ------- | ------------------------------------------------ |
 | `project` | `string`      | n/a     | Prefix for the dashboard bucket name; the module appends the current AWS account id. |
-| `index_html_path` | `string` | n/a | Absolute path to `app/dashboard/index.html`. |
+| `index_html_path` | `string` | n/a | Absolute path to `app/dashboard/index.html`. The module also uploads `favicon.ico` from the same directory. |
 | `app_js_path` | `string` | n/a | Absolute path to `app/dashboard/app.js`. |
 | `config_js_template_path` | `string` | n/a | Absolute path to `app/dashboard/config.js.tpl`. |
 | `api_endpoint` | `string` | n/a | API Gateway endpoint used for the bootstrap `config.js`. |
@@ -59,3 +59,5 @@ aws s3 sync dashboard-dist "s3://$(terraform output -raw dashboard_bucket_name)/
   --delete \
   --cache-control "no-cache, no-store, must-revalidate"
 ```
+
+Terraform uploads `favicon.ico` during `terraform apply`, and `app/dashboard/Dockerfile` includes the same file in `dashboard-dist` so the Deploy workflow keeps it during `aws s3 sync --delete`.

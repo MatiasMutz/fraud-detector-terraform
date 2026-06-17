@@ -8,6 +8,7 @@ locals {
 
   bucket_name         = format("%s-dashboard-%s", var.project, data.aws_caller_identity.current.account_id)
   static_cache_policy = "no-cache, no-store, must-revalidate"
+  favicon_ico_path    = "${dirname(var.index_html_path)}/favicon.ico"
 }
 
 resource "aws_s3_bucket" "dashboard" {
@@ -97,6 +98,19 @@ resource "aws_s3_object" "app_js" {
   source        = var.app_js_path
   source_hash   = filemd5(var.app_js_path)
   content_type  = "application/javascript"
+  cache_control = local.static_cache_policy
+
+  tags = merge(local.module_tags, {
+    Component = "s3-object"
+  })
+}
+
+resource "aws_s3_object" "favicon_ico" {
+  bucket        = aws_s3_bucket.dashboard.id
+  key           = "favicon.ico"
+  source        = local.favicon_ico_path
+  source_hash   = filemd5(local.favicon_ico_path)
+  content_type  = "image/x-icon"
   cache_control = local.static_cache_policy
 
   tags = merge(local.module_tags, {

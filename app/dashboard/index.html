@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Fraud Detector — Panel</title>
+  <link rel="icon" href="favicon.ico" sizes="any" />
   <style>
     :root {
       --bg: #f4f6f8;
@@ -312,21 +313,7 @@
     </div>
     <p class="login-tagline">Panel de operaciones</p>
     <p id="auth-status" class="auth-status" hidden></p>
-    <div id="auth-local" class="auth-block">
-      <form id="login-form" autocomplete="on">
-        <div class="field">
-          <label for="login-user">Usuario</label>
-          <input id="login-user" type="text" autocomplete="username" required />
-        </div>
-        <div class="field">
-          <label for="login-pass">Contraseña</label>
-          <input id="login-pass" type="password" autocomplete="current-password" required />
-        </div>
-        <button type="submit" class="btn-primary">Ingresar</button>
-      </form>
-      <p class="login-hint">Credenciales demo: <strong>cloud / cloud</strong></p>
-    </div>
-    <div id="auth-cognito" class="auth-block" hidden>
+    <div id="auth-cognito" class="auth-block">
       <button type="button" class="btn-primary" id="btn-cognito-login">Ingresar con Cognito</button>
       <p class="auth-note">
         <a href="#" id="forgot-password-link" class="auth-link">Olvidé mi contraseña</a>
@@ -568,11 +555,10 @@
                   <th>Email</th>
                   <th>Nombre</th>
                   <th>Estado</th>
-                  <th>Protección</th>
                   <th style="text-align:right">Acciones</th>
                 </tr>
               </thead>
-              <tbody id="invites-tbody"><tr><td colspan="5" class="loading-row">Cargando…</td></tr></tbody>
+              <tbody id="invites-tbody"><tr><td colspan="4" class="loading-row">Cargando…</td></tr></tbody>
             </table>
           </div>
         </div>

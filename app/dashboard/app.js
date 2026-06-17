@@ -1,9 +1,6 @@
 (function () {
   "use strict";
 
-  const DEMO_USER        = "cloud";
-  const DEMO_PASS        = "cloud";
-  const SESSION_KEY      = "fd_session_v2";
   const COGNITO_KEY      = "fd_cognito_session_v1";
   const PKCE_KEY         = "fd_cognito_pkce_v1";
   const AUTO_REFRESH     = 60_000;
@@ -13,7 +10,7 @@
   let refreshTimer = null;
   let tokenRefreshTimer = null;
   let authState = {
-    mode: "local",
+    mode: "cognito",
     config: null,
     tokens: null,
     me: null,
@@ -209,7 +206,6 @@
   }
 
   function clearAuthStorage() {
-    sessionStorage.removeItem(SESSION_KEY);
     sessionStorage.removeItem(COGNITO_KEY);
     sessionStorage.removeItem(PKCE_KEY);
   }
@@ -422,7 +418,7 @@
   function clearAuthState() {
     clearTimers();
     authState = {
-      mode: useCognito() ? "cognito" : "local",
+      mode: "cognito",
       config: authState.config,
       tokens: null,
       me: null,
@@ -442,17 +438,15 @@
 
   function setLoginMode(mode) {
     const loading = $("auth-loading");
-    const local = $("auth-local");
     const cognito = $("auth-cognito");
     if (loading) loading.hidden = mode !== "loading";
-    if (local) local.hidden = mode !== "local";
     if (cognito) cognito.hidden = mode !== "cognito";
   }
 
   function showLoginScreen(message = "") {
     hideAllViews();
     $("view-login").hidden = false;
-    setLoginMode(useCognito() ? "cognito" : "local");
+    setLoginMode("cognito");
     const status = $("auth-status");
     if (status) status.hidden = true;
     setStatus("offline");
@@ -512,7 +506,7 @@
     const delay = Math.max(10_000, expiresAt - Date.now() - TOKEN_REFRESH_PAD);
     tokenRefreshTimer = setTimeout(() => {
       clearAuthStorage();
-      showLoginScreen("Tu sesión expiró. Volvé a iniciar sesión.");
+      startCognitoLogin();
     }, delay);
   }
 
@@ -641,7 +635,7 @@
     try {
       const tokens = await resumeCognitoSession();
       if (!tokens?.access_token) {
-        showLoginScreen();
+        startCognitoLogin();
         return;
       }
       const access = await verifyCognitoAccess(tokens);
@@ -723,8 +717,7 @@
       window.location.assign(buildLogoutUrl());
       return;
     }
-    sessionStorage.removeItem(SESSION_KEY);
-    showLoginScreen();
+    showLoginScreen("La configuración de Cognito no está disponible.");
   }
 
   function gfParams(extra) {
@@ -747,7 +740,7 @@
     hideAllViews();
     if (name === "login") {
       $("view-login").hidden = false;
-      setLoginMode(useCognito() ? "cognito" : "local");
+      setLoginMode("cognito");
     } else if (name === "app") {
       $("view-app").hidden = false;
     } else if (name === "denied") {
@@ -1473,7 +1466,7 @@
     if (!authState.canManageInvites) return;
     clearErr("invites");
     const tbody = $("invites-tbody");
-    if (tbody) tbody.innerHTML = '<tr><td colspan="5" class="loading-row">Cargando…</td></tr>';
+    if (tbody) tbody.innerHTML = '<tr><td colspan="4" class="loading-row">Cargando…</td></tr>';
     try {
       const res = await apiFetch("/dashboard/invites");
       renderInvitesTable(normalizeArrayPayload(res));
@@ -1521,7 +1514,7 @@
     const tbody = $("invites-tbody");
     if (!tbody) return;
     if (!rows || rows.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="5" class="empty-row">No hay invitaciones.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="4" class="empty-row">No hay invitaciones.</td></tr>';
       return;
     }
     tbody.innerHTML = rows.map(row => {
@@ -1543,7 +1536,6 @@
         <td>${esc(email)}</td>
         <td>${esc(displayName || "—")}</td>
         <td>${esc(status)}</td>
-        <td>${isBootstrapAdmin ? '<span class="pill challenge">Protegida</span>' : (isDisabled ? '<span class="pill block">Inactiva</span>' : '<span class="pill allow">Activa</span>')}</td>
         <td style="text-align:right">${renderInviteActionCell(row)}</td>
       </tr>`;
     }).join("");
@@ -1601,28 +1593,10 @@
   // ── Bootstrap ──────────────────────────────────────────────────────────────
   function init() {
     authState.config = resolveCognitoConfig();
-    authState.mode = useCognito() ? "cognito" : "local";
+    authState.mode = "cognito";
     if (useCognito() && !ensureCognitoSecureContext()) return;
-    setLoginMode(useCognito() ? "cognito" : "local");
+    setLoginMode("cognito");
 
-    // Login
-    $("login-form").addEventListener("submit", e => {
-      e.preventDefault();
-      if (useCognito()) return;
-      const u = $("login-user").value.trim();
-      const p = $("login-pass").value;
-      if (u === DEMO_USER && p === DEMO_PASS) {
-        sessionStorage.setItem(SESSION_KEY, "1");
-        authState.isActive = true;
-        authState.deniedReason = "";
-        $("login-error").textContent = "";
-        showAppShell();
-        updatePermissionedUi();
-        loadFiltersDropdowns().then(() => setTab("overview"));
-      } else {
-        $("login-error").textContent = "Usuario o contraseña incorrectos.";
-      }
-    });
     const cognitoLoginButton = $("btn-cognito-login");
     if (cognitoLoginButton) cognitoLoginButton.addEventListener("click", startCognitoLogin);
     const forgotPasswordLink = $("forgot-password-link");
@@ -1708,14 +1682,7 @@
       return;
     }
 
-    if (sessionStorage.getItem(SESSION_KEY) === "1") {
-      authState.isActive = true;
-      showAppShell();
-      updatePermissionedUi();
-      loadFiltersDropdowns().then(() => setTab("overview"));
-    } else {
-      showLoginScreen();
-    }
+    showLoginScreen("La configuración de Cognito no está disponible.");
   }
 
   document.addEventListener("DOMContentLoaded", init);
