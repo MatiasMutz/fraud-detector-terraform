@@ -4,7 +4,9 @@
 
 # Lambda auto-creates its log group on first invocation, so it may already
 # exist before Terraform gets to create it.
+/*
 import {
   to = module.results_writer.aws_cloudwatch_log_group.writer
   id = "/aws/lambda/itba-tp-fraud-results-writer"
 }
+*/
